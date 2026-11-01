@@ -2,6 +2,66 @@
 
 Newest first. Coordinator updates this at each gate.
 
+## 2026-11-01 — Phase 1 (backend domains + UI kit): gate passed
+
+Threads ran as parallel subagents, each in its own directory. The
+coordinator re-ran every package's tests and checked the full stack in the
+production container.
+
+- **A, items** (15 tests): CRUD with nested create, observations,
+  identifiers (normalization + lookup), facts with supersede/reject and the
+  projection rule, products, tags, FTS5 search (prefix AND + exact
+  identifier), all filters, facets (each group excludes its own filter),
+  keyset paging, `/api/schema` + registry PUTs.
+- **B, media** (22 tests): streamed upload with sha256 dedupe, magic-byte
+  sniffing, EXIF subset (no GPS), worker (concurrency 1), variants, serving
+  (immutable, ETag/304, Range, HTML sandbox CSP), links, inbox,
+  `media.Rebuild`. Real HEIC fixtures in `internal/media/testdata/`.
+  **48 MP HEIC peak: 90 MB** (vips child 69 MB + Go 20 MB), via banded
+  decoding of the HEIC tile grid (`heif.go`); plain vipsthumbnail peaks at 239 MB.
+- **C, locations** (13 tests): tree with direct/total/staged counts,
+  create/patch/archive, item and whole-box moves (no per-item writes),
+  packing, staging, movement log, placement derivation.
+- **D, UI kit**: PhotoGrid, ItemCard, LocationChip, Gallery + MediaViewer,
+  FilterSheet + ActiveFilters, LocationPicker, MultiSelectBar, states and
+  primitives, on `/dev/kit` with fixtures and a live-data toggle.
+  svelte-check 0/0, vitest 24 tests.
+
+Gate checks by the coordinator:
+
+- `make test` passes: all Go packages, svelte-check, vitest.
+- Container with the demo seed: list/search/facets/locations/staging/inbox
+  all serve real data. A HEIC upload is stored byte for byte (sha256
+  matches), rotated (240×320), keeps `taken_at`, drops GPS; a re-upload
+  returns 200 and writes nothing; thumbs serve with immutable caching.
+- An item packed into a box in Unit 2 stays staged for Unit 1, then shows
+  placed at "Unit 1 › B-002" once the box moves to Unit 1.
+- Idle RSS 21 MB.
+
+Coordinator decisions in Phase 1:
+
+- **Placement:** an item whose location is its target or inside it is not
+  staged (`locations.Within`); the items status filter matches.
+- **Media dedupe:** a duplicate upload still applies `link_*` and fills an
+  empty `context` (contract text updated).
+- `inv media rebuild` wired to `media.Rebuild`.
+- Toast host mounted once in the layout; viewer tokens
+  (`--color-viewer-bg/fg`) keep the photo viewer dark; `createLocation`
+  client helper.
+- Accepted as-is: A's ten contract interpretations, C's archive rule (only
+  owned staged items block archiving) and nesting rule (site/room/unit can't
+  sit in a shelf or container), B's 400/422 choices.
+
+Known gaps carried forward:
+
+- A large *single-image* (non-grid) HEIC, or a grid with a crop box, still
+  decodes whole. iPhone photos are tile grids, so the common case is
+  covered; check with real photos in Phase 3.
+- Whether iOS Safari uploads HEIC originals is unverified on a real phone
+  (the upload input must not restrict `accept` to JPEG).
+- `GET /api/locations/{id}` returns all contents with no paging.
+- Media EXIF for HEIC has no `Orientation` (vips removes it after rotating).
+
 ## 2026-11-01 — Phase 0 (foundation): gate passed
 
 Done:

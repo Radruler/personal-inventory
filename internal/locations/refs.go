@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/radruler/personal-inventory/internal/db"
 	"github.com/radruler/personal-inventory/internal/httpapi"
@@ -12,29 +14,52 @@ import (
 )
 
 // ResolveRef turns a location reference into an id. A reference is either a
-// location id or "code:<CODE>" (case-insensitive). Empty input returns "".
-// Frozen signature (used by items and ingest).
+// location id or "code:<CODE>" (prefix and code case-insensitive). Empty
+// input returns "". An unknown reference is a 422 validation error, because
+// references usually arrive in request bodies; path parameters use lookup and
+// answer 404 instead. Frozen signature (used by items and ingest).
 func ResolveRef(ctx context.Context, q db.Querier, ref string) (string, error) {
+	id, ok, err := lookup(ctx, q, ref)
+	if err != nil || ok || strings.TrimSpace(ref) == "" {
+		return id, err
+	}
+	return "", httpapi.Validation("unknown location %q", ref)
+}
+
+// lookup resolves ref like ResolveRef but reports "not found" as ok=false.
+func lookup(ctx context.Context, q db.Querier, ref string) (string, bool, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return "", nil
+		return "", false, nil
 	}
 	var id string
 	var err error
-	if code, ok := strings.CutPrefix(ref, "code:"); ok {
-		err = q.QueryRowContext(ctx, `SELECT id FROM location WHERE code = ?`, code).Scan(&id)
+	if code, ok := cutCodePrefix(ref); ok {
+		// location.code is COLLATE NOCASE, so = is case-insensitive.
+		err = q.QueryRowContext(ctx, `SELECT id FROM location WHERE code = ?`, strings.TrimSpace(code)).Scan(&id)
 	} else {
 		err = q.QueryRowContext(ctx, `SELECT id FROM location WHERE id = ?`, ref).Scan(&id)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", httpapi.Validation("unknown location %q", ref)
+		return "", false, nil
 	}
-	return id, err
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
+}
+
+func cutCodePrefix(ref string) (string, bool) {
+	if len(ref) >= 5 && strings.EqualFold(ref[:5], "code:") {
+		return ref[5:], true
+	}
+	return "", false
 }
 
 // Refs loads LocationRefs (with full paths) for ids. Missing ids are absent.
 // Frozen signature (used by items, media and ingest).
 func Refs(ctx context.Context, q db.Querier, ids []string) (map[string]model.LocationRef, error) {
+	ids = uniqueNonEmpty(ids)
 	out := make(map[string]model.LocationRef, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -113,13 +138,15 @@ func PathLabel(p []model.LocationCrumb) string {
 // DerivePlacement computes the "where is it" status (PLAN.md §4.3):
 //
 //	gone        lifecycle = gone                       "Sold · 2026-03"
-//	staged      target set                             "Bedroom → going to Unit 2"
+//	staged      target set and not yet reached         "Bedroom → going to Unit 2"
 //	unknown     no location                            "Location unknown"
 //	approximate location is a site or unit             "Somewhere in Unit 2 (box unknown)"
 //	placed      location is a room, shelf or container "Unit 2 › B-014"
 //
 // Rooms count as placed: an item in the bedroom is where it belongs, while an
-// item "in Unit 2" is expected to be in some box there.
+// item "in Unit 2" is expected to be in some box there. A target counts as
+// reached when the location is the target or inside it; the item is then
+// shown by where it is, not as staged.
 // Frozen signature (used by items); rules belong to thread C.
 func DerivePlacement(lifecycle string, goneReason, goneAt *string, loc, target *model.LocationRef) model.Placement {
 	p := model.Placement{Location: loc, Target: target, GoneReason: goneReason, GoneAt: goneAt}
@@ -127,14 +154,14 @@ func DerivePlacement(lifecycle string, goneReason, goneAt *string, loc, target *
 	case lifecycle == model.LifecycleGone:
 		p.Status = model.PlacementGone
 		label := "Gone"
-		if goneReason != nil && *goneReason != "" {
-			label = strings.ToUpper((*goneReason)[:1]) + (*goneReason)[1:]
+		if goneReason != nil && strings.TrimSpace(*goneReason) != "" {
+			label = capitalize(strings.TrimSpace(*goneReason))
 		}
 		if goneAt != nil && len(*goneAt) >= 7 {
 			label += " · " + (*goneAt)[:7]
 		}
 		p.Label = label
-	case target != nil:
+	case target != nil && !Within(loc, target.ID):
 		p.Status = model.PlacementStaged
 		from := "Location unknown"
 		if loc != nil {
@@ -155,4 +182,40 @@ func DerivePlacement(lifecycle string, goneReason, goneAt *string, loc, target *
 		p.Label = loc.Label
 	}
 	return p
+}
+
+// capitalize upper-cases the first rune ("sold" → "Sold"), UTF-8 safe.
+func capitalize(s string) string {
+	r, n := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError {
+		return s
+	}
+	return string(unicode.ToUpper(r)) + s[n:]
+}
+
+// uniqueNonEmpty drops empty strings and duplicates, keeping order.
+func uniqueNonEmpty(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// Within reports whether loc is the location id or one of its descendants.
+func Within(loc *model.LocationRef, id string) bool {
+	if loc == nil {
+		return false
+	}
+	for _, c := range loc.Path {
+		if c.ID == id {
+			return true
+		}
+	}
+	return loc.ID == id
 }

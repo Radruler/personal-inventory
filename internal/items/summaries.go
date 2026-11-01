@@ -111,11 +111,3 @@ func Summaries(ctx context.Context, q db.Querier, ids []string) ([]model.ItemSum
 	}
 	return out, nil
 }
-
-func nullStr(n sql.NullString) *string {
-	if !n.Valid {
-		return nil
-	}
-	s := n.String
-	return &s
-}

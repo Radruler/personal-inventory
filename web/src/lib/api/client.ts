@@ -156,3 +156,8 @@ export function uploadMedia(file: File, opts: UploadOptions = {}): Promise<Schem
     xhr.send(form);
   });
 }
+
+/** POST /api/locations; resolves with the created LocationDetail. */
+export async function createLocation(req: Schemas['LocationCreate']): Promise<LocationDetail> {
+  return unwrap(await api.POST('/api/locations', { body: req }));
+}

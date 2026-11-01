@@ -8,14 +8,16 @@ import (
 	"github.com/radruler/personal-inventory/internal/httpapi"
 )
 
+type handlers struct{ d *httpapi.Deps }
+
 // Register mounts the locations routes. The route list matches api/openapi.yaml.
 func Register(mux *http.ServeMux, d *httpapi.Deps) {
-	ni := httpapi.NotImplemented
-	mux.HandleFunc("GET /api/locations", ni)
-	mux.HandleFunc("POST /api/locations", ni)
-	mux.HandleFunc("GET /api/locations/{id}", ni)
-	mux.HandleFunc("PATCH /api/locations/{id}", ni)
-	mux.HandleFunc("DELETE /api/locations/{id}", ni)
-	mux.HandleFunc("POST /api/moves", ni)
-	mux.HandleFunc("GET /api/staging", ni)
+	h := &handlers{d: d}
+	mux.HandleFunc("GET /api/locations", d.Handler(h.list))
+	mux.HandleFunc("POST /api/locations", d.Handler(h.create))
+	mux.HandleFunc("GET /api/locations/{id}", d.Handler(h.get))
+	mux.HandleFunc("PATCH /api/locations/{id}", d.Handler(h.patch))
+	mux.HandleFunc("DELETE /api/locations/{id}", d.Handler(h.archive))
+	mux.HandleFunc("POST /api/moves", d.Handler(h.move))
+	mux.HandleFunc("GET /api/staging", d.Handler(h.staging))
 }

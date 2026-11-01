@@ -4,6 +4,7 @@
   import '$styles/base.css';
   import { page } from '$app/state';
   import { auth, setToken } from '$lib/api/auth.svelte';
+  import Toaster from '$lib/components/Toaster.svelte';
 
   let { children } = $props();
 
@@ -49,6 +50,8 @@
     {/each}
   </nav>
 </div>
+
+<Toaster />
 
 {#if auth.needed}
   <div class="token-backdrop" role="presentation">

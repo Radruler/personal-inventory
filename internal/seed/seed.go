@@ -418,22 +418,7 @@ func (s *seeder) fact(ctx context.Context, subjectType, subjectID, key string, v
 
 func (s *seeder) ident(ctx context.Context, itemID, scheme, value, obsID string) error {
 	return s.exec(ctx, `INSERT INTO identifier (id, subject_type, subject_id, scheme, value, value_norm, observation_id, recorded_at)
-	      VALUES (?, 'item', ?, ?, ?, ?, ?, ?)`, db.NewID(), itemID, scheme, value, Norm(value), obsID, s.now())
-}
-
-// Norm is the identifier normalization used by the seed; items owns the
-// canonical version (uppercase, strip spaces, dashes, dots and slashes).
-func Norm(v string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case ' ', '-', '.', '/', '_', '\t':
-			return -1
-		}
-		if r >= 'a' && r <= 'z' {
-			return r - 32
-		}
-		return r
-	}, v)
+	      VALUES (?, 'item', ?, ?, ?, ?, ?, ?)`, db.NewID(), itemID, scheme, value, items.NormIdentifier(value), obsID, s.now())
 }
 
 func codesFrom(label string) []string {

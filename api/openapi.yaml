@@ -636,8 +636,10 @@ paths:
       summary: Upload one file (streamed, deduplicated by sha256)
       description: |
         The original is stored byte for byte. If a file with the same sha256
-        exists, nothing is written and the existing row is returned with
-        `200` and `deduplicated: true`. Image variants are generated
+        exists, the existing row is returned with `200` and
+        `deduplicated: true`, and nothing is written unless the request
+        also carries `link_*` fields (the link is applied) or a `context`
+        while the stored row has none (it is filled in). Image variants are generated
         asynchronously (`variant_status` goes `pending` → `ready`/`failed`).
         PDF and HTML are stored as-is with `variant_status: none`.
         Optional `link_*` fields link the media in the same request.

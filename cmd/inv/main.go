@@ -55,7 +55,10 @@ func run(args []string) error {
 	case "ingest", "export", "import", "backup":
 		return fmt.Errorf("%s: not implemented yet", cmd)
 	case "media":
-		return fmt.Errorf("media %v: not implemented yet", args)
+		if len(args) != 1 || args[0] != "rebuild" {
+			return fmt.Errorf("usage: inv media rebuild")
+		}
+		return withDeps(func(ctx context.Context, d *httpapi.Deps) error { return media.Rebuild(ctx, d, os.Stdout) })
 	case "help", "-h", "--help":
 		fmt.Println(usage)
 		return nil
