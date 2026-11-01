@@ -1,0 +1,28 @@
+# Dev container. `make <target>` on the Mac runs inside this service
+# automatically when Go is not installed locally.
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inv-devcontainer:go1.26-node22
+    command: sleep infinity
+    working_dir: /workspaces/personal-inventory
+    init: true
+    ports:
+      - "127.0.0.1:8481:8480"   # inv serve (dev); the compose.yml app uses 8480
+      - "127.0.0.1:5173:5173"   # vite dev server
+    volumes:
+      - ..:/workspaces/personal-inventory:cached
+      - inv-go-cache:/go/cache
+      - inv-web-node-modules:/workspaces/personal-inventory/web/node_modules
+      - inv-dev-runtime:/workspaces/personal-inventory/.local
+    environment:
+      INV_DATA_DIR: /workspaces/personal-inventory/.local/data
+      INV_MEDIA_DIR: /workspaces/personal-inventory/.local/media
+      INV_ADDR: ":8480"
+
+volumes:
+  inv-go-cache:
+  inv-web-node-modules:
+  inv-dev-runtime:

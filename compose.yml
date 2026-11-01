@@ -1,0 +1,32 @@
+# Local run (`make up`) and the shape of the TrueNAS custom app
+# (docs/DEPLOY.md). On the NAS, drop `build:` and point the volumes at host
+# paths: /data on the SSD app pool, /media on the HDD pool.
+services:
+  inv:
+    image: ${INV_IMAGE:-ghcr.io/radruler/personal-inventory:latest}
+    build:
+      context: .
+      args:
+        VERSION: local
+    container_name: personal-inventory
+    restart: unless-stopped
+    ports:
+      - "${INV_PORT:-8480}:8480"
+    environment:
+      INV_TOKEN: ${INV_TOKEN:-}
+      INV_LOG_LEVEL: ${INV_LOG_LEVEL:-info}
+      INV_ACCESS_LOG: ${INV_ACCESS_LOG:-0}
+      GOMEMLIMIT: 64MiB
+    volumes:
+      - ${INV_DATA_PATH:-inv-data}:/data      # SSD: inv.db, thumbs/
+      - ${INV_MEDIA_PATH:-inv-media}:/media   # HDD: orig/, var/
+    # The default json-file driver writes unbounded logs to disk.
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"
+
+volumes:
+  inv-data:
+  inv-media:

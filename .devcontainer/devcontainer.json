@@ -1,0 +1,12 @@
+{
+  "name": "personal-inventory",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
+  "workspaceFolder": "/workspaces/personal-inventory",
+  "postCreateCommand": "make deps",
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go", "svelte.svelte-vscode"]
+    }
+  }
+}

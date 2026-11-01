@@ -1,0 +1,21 @@
+# local runtime data
+/.local/
+/data/
+/media/
+*.db
+*.db-wal
+*.db-shm
+
+# build output
+/bin/
+/internal/webui/dist/
+/web/.svelte-kit/
+/web/build/
+/web/node_modules/
+/coverage.out
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

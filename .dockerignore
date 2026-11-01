@@ -1,0 +1,14 @@
+.git
+.local
+.devcontainer
+.github
+bin
+data
+media
+docs
+**/node_modules
+web/.svelte-kit
+internal/webui/dist
+*.db
+*.db-wal
+*.db-shm

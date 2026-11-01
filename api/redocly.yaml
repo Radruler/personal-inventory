@@ -1,0 +1,9 @@
+extends:
+  - recommended
+rules:
+  security-defined: off          # auth is optional (INV_TOKEN), documented in info.description
+  operation-4xx-response: off
+  tag-description: off
+  info-license-strict: off
+  no-server-example.com: off
+  no-ambiguous-paths: off        # /api/media/sha256/{sha} vs /api/media/{id}/links: different methods

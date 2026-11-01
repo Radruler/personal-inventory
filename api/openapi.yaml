@@ -1,0 +1,1735 @@
+openapi: 3.1.0
+info:
+  title: Personal Inventory API
+  version: 0.1.0
+  summary: Self-hosted inventory of things I own, where they are, and what we know about them.
+  description: |
+    The normative contract between the Go backend, the Svelte SPA and agents.
+    Changes go through the coordinator (docs/PLAN.md §10).
+
+    ## Conventions
+
+    * IDs are ULIDs. Wherever a **location** is accepted (`location`, `to`,
+      `target_location`, `parent`, `?location=`), a `LocationRef` string is
+      accepted: either a location id or `code:<CODE>` (case-insensitive),
+      e.g. `code:B-014`.
+    * Timestamps are UTC ISO-8601 with milliseconds: `2026-11-01T10:00:00.000Z`.
+    * `recorded_by` / `actor` identify who wrote something: `user` or
+      `agent:<model>` (e.g. `agent:claude-opus-5-5`). If a body omits it, the
+      `X-Actor` request header is used, else `user`.
+    * Request bodies reject unknown fields (`400 bad_request`) so typos are noticed.
+    * Errors are always `{"error": {"code", "message", "details?"}}`.
+    * List endpoints page with an opaque `cursor`; `next_cursor` is null on the last page.
+    * **Auth:** off by default. If the server has `INV_TOKEN` set, every
+      non-GET `/api` request needs `Authorization: Bearer <token>`. Reads stay open.
+    * **No writes on reads.** No GET endpoint changes anything on disk.
+
+    ## Layers
+
+    * **Observed** (`Observation`, `Identifier`): what is literally on the thing. Append-only.
+    * **Derived** (`Fact`): what we believe, with `basis`, `confidence`, `sources`.
+      Append-only with supersede chains.
+    * **Projection** (`attrs`): best active fact per key. Precedence: basis
+      `user` > `observed` > `looked_up` > `inferred`, then higher confidence,
+      then newer. Product attrs fill keys the item lacks.
+  license:
+    name: Private
+servers:
+  - url: http://localhost:8480
+    description: Local Docker
+tags:
+  - name: system
+  - name: items
+  - name: products
+  - name: knowledge
+    description: Observations, identifiers, facts, references, tags
+  - name: locations
+  - name: media
+  - name: ingest
+
+paths:
+  /api/health:
+    get:
+      tags: [system]
+      operationId: getHealth
+      summary: Liveness and build info
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+              example: { status: ok, version: v0.1.0, schema_version: 1, vips: 8.16.1, auth_required: false, time: '2026-11-01T10:00:00Z' }
+
+  /api/schema:
+    get:
+      tags: [system]
+      operationId: getSchema
+      summary: Vocabulary discovery for agents and the UI
+      description: Kinds, media roles, observation sources, location kinds, fact bases, and the fact_key / identifier_scheme registries. Agents call this before writing so they reuse existing keys and schemes.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SchemaInfo' }
+
+  /api/schema/fact-keys/{key}:
+    put:
+      tags: [system]
+      operationId: putFactKey
+      summary: Create or update a fact_key registry entry
+      parameters:
+        - { name: key, in: path, required: true, schema: { type: string }, example: shell.technology }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FactKeyInput' }
+            example: { label: Shell technology, value_type: string, kinds: [clothing], filterable: false, description: e.g. GORE-TEX 3L }
+      responses:
+        '200': { description: Saved, content: { application/json: { schema: { $ref: '#/components/schemas/FactKey' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/schema/identifier-schemes/{scheme}:
+    put:
+      tags: [system]
+      operationId: putIdentifierScheme
+      summary: Create or update an identifier_scheme registry entry
+      description: Use `notes` to record accumulated knowledge about the scheme.
+      parameters:
+        - { name: scheme, in: path, required: true, schema: { type: string }, example: uniqlo.product_code }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IdentifierSchemeInput' }
+      responses:
+        '200': { description: Saved, content: { application/json: { schema: { $ref: '#/components/schemas/IdentifierScheme' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/items:
+    get:
+      tags: [items]
+      operationId: listItems
+      summary: Search and filter items
+      description: |
+        All filters combine with AND. Repeating a filter (or comma-separating
+        values) ORs within that filter. Attribute filters use query parameter
+        names of the form `attr.<key>` (e.g. `attr.color=navy&attr.size=M`);
+        they match the projected `attrs` value case-insensitively (for array
+        values, any element). By default only `lifecycle=owned` items are returned.
+      parameters:
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Kind'
+        - $ref: '#/components/parameters/Category'
+        - $ref: '#/components/parameters/LocationFilter'
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/TagFilter'
+        - $ref: '#/components/parameters/Review'
+        - $ref: '#/components/parameters/Lifecycle'
+        - $ref: '#/components/parameters/ProductFilter'
+        - $ref: '#/components/parameters/Attr'
+        - name: sort
+          in: query
+          schema: { type: string, enum: [relevance, updated, created, title], default: updated }
+          description: '`relevance` needs `q` (else falls back to `updated`). `updated`/`created` are newest first; `title` is A→Z.'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of item cards
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ItemList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      tags: [items]
+      operationId: createItem
+      summary: Create an item, optionally with nested knowledge and media links
+      description: |
+        Creates the item and everything nested in one transaction. Nested
+        `identifiers[].observation` and `facts[].sources[].observation` are
+        0-based indexes into this request's `observations`. If `ext_key`
+        already exists the request fails with 409 (`details.id` is the
+        existing item); use `/api/ingest/bundle` for idempotent upserts.
+        Setting `location` records a movement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ItemCreate' }
+            example:
+              kind: clothing
+              title: Navy shell jacket
+              category: outerwear/shell
+              location: code:BEDROOM
+              target_location: code:U2
+              tags: [rain]
+              media: [{ media_id: 01JC0000000000000000000001, role: flat_lay }, { media_id: 01JC0000000000000000000002, role: care_label }]
+              observations:
+                - source: care_label
+                  media_id: 01JC0000000000000000000002
+                  text: "SHELL: 100% NYLON\nRN 12345\n341-456789(23SS)"
+                  data: { codes: ['RN 12345', '341-456789(23SS)'] }
+              identifiers:
+                - { scheme: rn, value: '12345', observation: 0 }
+                - { scheme: uniqlo.product_code, value: 341-456789, observation: 0 }
+              facts:
+                - { key: brand, value: Uniqlo, basis: observed, confidence: 1, sources: [{ observation: 0 }] }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/ItemDetail' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/items/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    get:
+      tags: [items]
+      operationId: getItem
+      summary: Everything about one item
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ItemDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [items]
+      operationId: updateItem
+      summary: Update item fields
+      description: |
+        Only fields present are changed; `null` clears a nullable field.
+        Location changes are not accepted here — use `POST /api/moves` so
+        history is recorded. Setting `lifecycle: gone` sets `gone_at` (now)
+        unless given; setting `lifecycle: owned` clears `gone_reason`/`gone_at`.
+        `tags`, when present, replaces the whole tag set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ItemPatch' }
+            example: { title: Navy Gore-Tex shell jacket, review_state: ok }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ItemDetail' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+    delete:
+      tags: [items]
+      operationId: retireItem
+      summary: Soft delete — mark the item gone
+      description: Sets `lifecycle=gone`, `gone_at=now`. Gone items are kept forever; hard delete is `DELETE /api/admin/items/{id}`.
+      parameters:
+        - name: reason
+          in: query
+          schema: { $ref: '#/components/schemas/GoneReason' }
+      responses:
+        '200': { description: Retired, content: { application/json: { schema: { $ref: '#/components/schemas/ItemDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/admin/items/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    delete:
+      tags: [items]
+      operationId: hardDeleteItem
+      summary: Permanently delete an item and its observations, identifiers, facts, references, tags, links and movements
+      description: Media files are kept (they return to the Inbox if nothing else links them). Child items lose their parent.
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/items/{id}/observations:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    post:
+      tags: [knowledge]
+      operationId: addObservation
+      summary: Record what is literally written on the item
+      description: Observations are append-only. A correction is a new observation; nothing is edited in place.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ObservationInput' }
+            example:
+              source: care_label
+              media_id: 01JC0000000000000000000002
+              text: "SHELL: 100% NYLON\nLINING: 100% POLYESTER\nRN 12345\nMADE IN VIETNAM\n341-456789(23SS)"
+              data:
+                composition: [{ part: shell, materials: [{ name: nylon, pct: 100 }] }, { part: lining, materials: [{ name: polyester, pct: 100 }] }]
+                country_of_origin: VIETNAM
+                codes: ['RN 12345', '341-456789(23SS)']
+              recorded_by: agent:claude-opus-5-5
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Observation' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/items/{id}/identifiers:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    post:
+      tags: [knowledge]
+      operationId: addItemIdentifier
+      summary: Attach a code (any scheme) to the item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IdentifierInput' }
+            example: { scheme: rn, value: '12345', observation_id: 01JC0000000000000000000003 }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Identifier' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/items/{id}/facts:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    post:
+      tags: [knowledge]
+      operationId: addItemFact
+      summary: Add a derived claim; recomputes the item's attrs
+      description: Adding a fact never removes others. To replace a value use `POST /api/facts/{id}/supersede`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FactInput' }
+            example: { key: season, value: 2023 Spring/Summer, basis: inferred, confidence: 0.8, sources: [{ observation_id: 01JC0000000000000000000003 }, { note: "Uniqlo '23SS' suffix convention" }] }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/FactWrite' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/items/{id}/references:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    post:
+      tags: [knowledge]
+      operationId: addItemReference
+      summary: Attach an external source (product page, listing, receipt)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReferenceInput' }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Reference' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/items/{id}/tags:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    post:
+      tags: [knowledge]
+      operationId: editItemTags
+      summary: Add and/or remove tags
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TagEdit' }
+            example: { add: [winter], remove: [rain] }
+      responses:
+        '200': { description: The resulting tag set, content: { application/json: { schema: { $ref: '#/components/schemas/TagSet' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/facts/{id}/supersede:
+    parameters:
+      - $ref: '#/components/parameters/FactID'
+    post:
+      tags: [knowledge]
+      operationId: supersedeFact
+      summary: Replace a fact with a new one
+      description: Marks the fact `superseded` and creates a new active fact with `supersedes_id` set. `key` defaults to the old fact's key. Recomputes the subject's attrs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FactSupersede' }
+            example: { value: GORE-TEX Pro, basis: user, note: checked the hang tag }
+      responses:
+        '201': { description: The new fact, content: { application/json: { schema: { $ref: '#/components/schemas/FactWrite' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/facts/{id}/reject:
+    parameters:
+      - $ref: '#/components/parameters/FactID'
+    post:
+      tags: [knowledge]
+      operationId: rejectFact
+      summary: Mark a fact wrong
+      description: Sets `status=rejected` (the row is kept for history) and recomputes attrs. Rejecting a non-active fact is a 409.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FactReject' }
+            example: { note: not the same model }
+      responses:
+        '200': { description: The rejected fact, content: { application/json: { schema: { $ref: '#/components/schemas/FactWrite' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/facets:
+    get:
+      tags: [items]
+      operationId: getFacets
+      summary: Counts for the filter sheet
+      description: Accepts the same filters as `GET /api/items`. Each group's counts are computed with that group's own filter removed (so selecting a color still shows other colors). Attribute groups are the `fact_key`s with `filterable=true`, named `attr.<key>`.
+      parameters:
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Kind'
+        - $ref: '#/components/parameters/Category'
+        - $ref: '#/components/parameters/LocationFilter'
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/TagFilter'
+        - $ref: '#/components/parameters/Review'
+        - $ref: '#/components/parameters/Lifecycle'
+        - $ref: '#/components/parameters/ProductFilter'
+        - $ref: '#/components/parameters/Attr'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Facets' }
+              example:
+                total: 58
+                groups:
+                  - { field: kind, label: Kind, values: [{ value: clothing, label: Clothing, count: 40 }, { value: object, label: Object, count: 11 }] }
+                  - { field: status, label: Where, values: [{ value: placed, label: Placed, count: 30 }, { value: staged, label: Staged, count: 8 }] }
+                  - { field: attr.color, label: Color, values: [{ value: navy, label: navy, count: 6 }] }
+
+  /api/identifiers/lookup:
+    get:
+      tags: [knowledge]
+      operationId: lookupIdentifier
+      summary: Find items/products that carry a code (duplicate detection)
+      description: Matches on the normalized value (uppercase, no spaces, dashes, dots, slashes or underscores). Agents call this before creating an item.
+      parameters:
+        - { name: value, in: query, required: true, schema: { type: string }, example: 341-456789 }
+        - { name: scheme, in: query, schema: { type: string }, description: Restrict to one scheme }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/IdentifierLookup' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/products:
+    get:
+      tags: [products]
+      operationId: listProducts
+      summary: List products
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Substring match on brand and name }
+        - { name: brand, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ProductList' } } } }
+    post:
+      tags: [products]
+      operationId: createProduct
+      summary: Create a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductCreate' }
+            example: { brand: Uniqlo, name: Blocktech Parka (2023), ext_key: uniqlo/341-456789/23SS }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/ProductDetail' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/products/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ProductID'
+    get:
+      tags: [products]
+      operationId: getProduct
+      summary: A product with its knowledge and my items
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ProductDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [products]
+      operationId: updateProduct
+      summary: Update a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductPatch' }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ProductDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+    delete:
+      tags: [products]
+      operationId: deleteProduct
+      summary: Delete a product that no item points at
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/products/{id}/identifiers:
+    parameters:
+      - $ref: '#/components/parameters/ProductID'
+    post:
+      tags: [knowledge]
+      operationId: addProductIdentifier
+      summary: Attach a code to a product
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/IdentifierInput' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Identifier' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/products/{id}/facts:
+    parameters:
+      - $ref: '#/components/parameters/ProductID'
+    post:
+      tags: [knowledge]
+      operationId: addProductFact
+      summary: Add a product-level claim (retail price, release season); recomputes attrs of the product and its items
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/FactInput' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/FactWrite' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/products/{id}/references:
+    parameters:
+      - $ref: '#/components/parameters/ProductID'
+    post:
+      tags: [knowledge]
+      operationId: addProductReference
+      summary: Attach an external source to a product
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReferenceInput' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Reference' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/locations:
+    get:
+      tags: [locations]
+      operationId: listLocations
+      summary: The location tree with item counts
+      parameters:
+        - { name: include_archived, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LocationTree' } } } }
+    post:
+      tags: [locations]
+      operationId: createLocation
+      summary: Create a location (site, room, unit, shelf, box)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LocationCreate' }
+            example: { code: B-014, name: Winter coats, kind: container, parent: code:U2 }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/LocationDetail' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/locations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Location id or `code:<CODE>`
+        schema: { $ref: '#/components/schemas/LocationRefString' }
+    get:
+      tags: [locations]
+      operationId: getLocation
+      summary: A location with its path, children and contents
+      parameters:
+        - { name: deep, in: query, schema: { type: boolean, default: false }, description: "Include items in descendant locations, not just direct contents" }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LocationDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [locations]
+      operationId: updateLocation
+      summary: Rename, re-code, re-kind, archive or edit a location
+      description: Re-parenting is not accepted here — moving a box is `POST /api/moves` with `location_id`, so history is recorded.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LocationPatch' } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/LocationDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+    delete:
+      tags: [locations]
+      operationId: archiveLocation
+      summary: Archive an empty location
+      description: Sets `archived_at`. Fails with 409 if any owned item or non-archived child is inside, or any item targets it.
+      responses:
+        '204': { description: Archived }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/moves:
+    post:
+      tags: [locations]
+      operationId: move
+      summary: Move items, move a whole box, stage or unstage
+      description: |
+        One request, one transaction, one `movement` row per moved thing.
+
+        | action | subject | `to` | effect |
+        |---|---|---|---|
+        | `move` | `item_ids` | location or `null` (unknown) | sets `location_id`. Clears `target_location_id` when the destination is the target or inside it (packing), or when `clear_target` is true. |
+        | `move` | `location_id` | location or `null` (top level) | re-parents the box; its contents move with it with **no per-item writes**. Cycles are rejected. |
+        | `stage` | `item_ids` | location (required) | sets `target_location_id` |
+        | `unstage` | `item_ids` | — | clears `target_location_id` |
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MoveRequest' }
+            examples:
+              pack:
+                summary: Pack staged items into a box
+                value: { action: move, item_ids: [01JC0000000000000000000010, 01JC0000000000000000000011], to: code:B-014, note: packed Sunday }
+              moveBox:
+                summary: Move a box to another unit
+                value: { action: move, location_id: code:B-014, to: code:U1 }
+              stage:
+                value: { action: stage, item_ids: [01JC0000000000000000000010], to: code:U2 }
+      responses:
+        '200': { description: Done, content: { application/json: { schema: { $ref: '#/components/schemas/MoveResult' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  /api/staging:
+    get:
+      tags: [locations]
+      operationId: getStaging
+      summary: Staged items grouped by target, plus the unknown-location count
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Staging' } } } }
+
+  /api/media:
+    post:
+      tags: [media]
+      operationId: uploadMedia
+      summary: Upload one file (streamed, deduplicated by sha256)
+      description: |
+        The original is stored byte for byte. If a file with the same sha256
+        exists, nothing is written and the existing row is returned with
+        `200` and `deduplicated: true`. Image variants are generated
+        asynchronously (`variant_status` goes `pending` → `ready`/`failed`).
+        PDF and HTML are stored as-is with `variant_status: none`.
+        Optional `link_*` fields link the media in the same request.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/MediaUpload' }
+            encoding:
+              file: { contentType: 'image/heic, image/heif, image/jpeg, image/png, image/webp, application/pdf, text/html' }
+      responses:
+        '201': { description: Stored, content: { application/json: { schema: { $ref: '#/components/schemas/MediaUploadResult' } } } }
+        '200': { description: Already had it, content: { application/json: { schema: { $ref: '#/components/schemas/MediaUploadResult' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/Unsupported' }
+
+  /api/media/sha256/{sha}:
+    parameters:
+      - { name: sha, in: path, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+    get:
+      tags: [media]
+      operationId: getMediaBySha
+      summary: '"Already have it?" — HEAD returns 200/404 with no body'
+      description: '`HEAD` answers 200 (with `X-Media-Id`) or 404 and no body. `GET` returns the media row.'
+      responses:
+        '200':
+          description: Known
+          headers:
+            X-Media-Id: { schema: { type: string } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Media' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/media/{id}:
+    parameters:
+      - $ref: '#/components/parameters/MediaID'
+    get:
+      tags: [media]
+      operationId: getMedia
+      summary: A media row with its links
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Media' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [media]
+      operationId: updateMedia
+      summary: Edit the owner's context note
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MediaPatch' } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Media' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [media]
+      operationId: deleteMedia
+      summary: Delete an unlinked (Inbox) photo and its files
+      description: Fails with 409 if the media is linked anywhere, used as an observation source, a reference archive, or a cover.
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/media/{id}/links:
+    parameters:
+      - $ref: '#/components/parameters/MediaID'
+    post:
+      tags: [media]
+      operationId: linkMedia
+      summary: Link media to an item, product or location (upsert on subject)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MediaLinkInput' }
+            example: { subject_type: item, subject_id: 01JC0000000000000000000010, role: flat_lay }
+      responses:
+        '200': { description: Linked, content: { application/json: { schema: { $ref: '#/components/schemas/MediaLink' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+    delete:
+      tags: [media]
+      operationId: unlinkMedia
+      summary: Remove a link
+      parameters:
+        - { name: subject_type, in: query, required: true, schema: { $ref: '#/components/schemas/LinkSubjectType' } }
+        - { name: subject_id, in: query, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Unlinked }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/inbox:
+    get:
+      tags: [media]
+      operationId: getInbox
+      summary: Unlinked photos (with owner context) and items awaiting review
+      description: Media is oldest first by `taken_at` (then `created_at`) so bursts stay together. Media used as an observation source or reference archive does not count as unlinked.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 200 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Inbox' } } } }
+
+  /media/{sha}/{variant}:
+    parameters:
+      - { name: sha, in: path, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      - { name: variant, in: path, required: true, schema: { type: string, enum: [thumb, display, orig] } }
+    get:
+      tags: [media]
+      operationId: serveMedia
+      summary: Serve a stored file
+      description: |
+        `thumb` (400px WebP) and `display` (1600px WebP) are auto-rotated and
+        metadata-stripped; `orig` is the original bytes with
+        `Content-Disposition: inline; filename="<original_name>"`. All carry
+        `Cache-Control: public, max-age=31536000, immutable` and an ETag.
+        For documents (PDF/HTML) only `orig` exists. HTML archives are
+        served with a restrictive `Content-Security-Policy` (sandbox).
+      responses:
+        '200': { description: The file, content: { image/webp: {}, image/*: {}, application/pdf: {}, text/html: {} } }
+        '304': { description: Not modified }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/ingest/bundle:
+    post:
+      tags: [ingest]
+      operationId: applyBundle
+      summary: Transactional, idempotent bulk write (PLAN.md §7)
+      description: |
+        Applies the whole bundle in one transaction, or nothing. Items and
+        products are matched by `ext_key`: an existing one is updated, a new
+        one created. Nested observations/identifiers/facts/references get a
+        derived ext_key (`<item ext_key>#obs/<i>`, `#id/<i>`, `#fact/<i>`,
+        `#ref/<i>`) unless one is given, so re-applying the same bundle
+        creates no duplicates; a changed fact value supersedes the old fact.
+        Media must already be uploaded and is referenced by `media_id` or
+        `sha256` (`inv ingest` uploads local `path`s first and rewrites
+        them). With `?dry_run=true` nothing is written and the result says
+        what would change. `location`/`target_location` apply only when an
+        item is created, so re-running never undoes a move made since.
+      parameters:
+        - { name: dry_run, in: query, schema: { type: boolean, default: false } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Bundle' }
+            example:
+              defaults: { location: code:BEDROOM, target_location: code:U2, review_state: needs_review, recorded_by: agent:claude-opus-5-5 }
+              items:
+                - ext_key: batch-2026-11-01/jacket-01
+                  kind: clothing
+                  title: Navy shell jacket
+                  category: outerwear/shell
+                  media: [{ sha256: 9f2c0000000000000000000000000000000000000000000000000000000000aa, role: flat_lay }, { sha256: 9f2c0000000000000000000000000000000000000000000000000000000000bb, role: care_label }]
+                  observations: [{ source: care_label, media: 'sha256:9f2c0000000000000000000000000000000000000000000000000000000000bb', text: "SHELL: 100% NYLON\nRN 12345", data: { codes: ['RN 12345'] } }]
+                  identifiers: [{ scheme: rn, value: '12345', observation: 0 }]
+                  facts: [{ key: brand, value: Uniqlo, basis: observed, confidence: 1, sources: [{ observation: 0 }] }]
+                  product: { ext_key: uniqlo/341-456789/23SS, brand: Uniqlo, name: Blocktech Parka }
+      responses:
+        '200': { description: Applied (or dry-run plan), content: { application/json: { schema: { $ref: '#/components/schemas/BundleResult' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422':
+          description: The bundle is invalid; nothing was written. `details` lists every problem.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example: { error: { code: validation, message: bundle has 2 problems, details: [{ path: 'items[0].media[1]', message: 'unknown sha256 9f2c…bb; upload it first' }, { path: 'items[3].kind', message: 'must be clothing, object or utility' }] } }
+
+  /api/export:
+    get:
+      tags: [ingest]
+      operationId: exportAll
+      summary: Stream everything as a tar (JSONL + media)
+      description: |
+        Layout, readable without the app: `manifest.json`, `items.jsonl`,
+        `products.jsonl`, `locations.jsonl`, `observations.jsonl`,
+        `identifiers.jsonl`, `facts.jsonl`, `references.jsonl`,
+        `media.jsonl`, `media_links.jsonl`, `movements.jsonl`, `tags.jsonl`,
+        `registries.jsonl`, and `media/<sha256>.<ext>` originals (variants
+        are not exported; they are regenerated). `inv export DIR` writes the
+        same layout to a directory and `inv import DIR` restores it.
+      parameters:
+        - { name: media, in: query, schema: { type: boolean, default: true }, description: Include original media files }
+      responses:
+        '200': { description: tar stream, content: { application/x-tar: {} } }
+
+components:
+  parameters:
+    ItemID: { name: id, in: path, required: true, schema: { type: string }, example: 01JC0000000000000000000010 }
+    ProductID: { name: id, in: path, required: true, schema: { type: string } }
+    FactID: { name: id, in: path, required: true, schema: { type: string } }
+    MediaID: { name: id, in: path, required: true, schema: { type: string } }
+    Q:
+      name: q
+      in: query
+      description: Full-text search over title, category, notes, tags, observation text, identifier values and key attrs. Words are prefix-matched and ANDed. An exact identifier value (normalized) also matches.
+      schema: { type: string }
+      example: navy jacket
+    Kind: { name: kind, in: query, schema: { type: array, items: { $ref: '#/components/schemas/Kind' } }, style: form, explode: true }
+    Category:
+      name: category
+      in: query
+      description: Category path prefix; `outerwear` matches `outerwear/shell`.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    LocationFilter:
+      name: location
+      in: query
+      description: Items inside this location or any descendant. Location id or `code:<CODE>`. The value `unknown` selects items with no location.
+      schema: { type: string }
+    StatusFilter:
+      name: status
+      in: query
+      description: Placement status (see `Placement`).
+      schema: { type: array, items: { $ref: '#/components/schemas/PlacementStatus' } }
+      style: form
+      explode: true
+    TagFilter: { name: tag, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true }
+    Review: { name: review, in: query, schema: { $ref: '#/components/schemas/ReviewState' } }
+    Lifecycle:
+      name: lifecycle
+      in: query
+      schema: { type: string, enum: [owned, gone, all], default: owned }
+    ProductFilter: { name: product, in: query, schema: { type: string }, description: Product id }
+    Attr:
+      name: attr
+      in: query
+      description: 'Documentation stand-in for `attr.<key>=<value>` parameters (e.g. `attr.color=navy`). Clients send them as literal `attr.<key>` query names.'
+      schema: { type: object, additionalProperties: { type: string } }
+      style: form
+      explode: true
+    Cursor: { name: cursor, in: query, schema: { type: string }, description: Opaque cursor from `next_cursor` }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 60 } }
+
+  responses:
+    BadRequest: { description: Malformed request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Validation: { description: Well-formed but invalid, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    NotFound: { description: No such resource, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Conflict: { description: Conflicts with current state, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    TooLarge: { description: Upload exceeds INV_MAX_UPLOAD_MB, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Unsupported: { description: File type not supported, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+
+  schemas:
+    # ---------------------------------------------------------------- basics
+    ErrorCode:
+      type: string
+      enum: [bad_request, validation, unauthorized, not_found, conflict, payload_too_large, unsupported_media_type, not_implemented, internal]
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string }
+            details: { description: 'Extra context, e.g. `{"id": "<existing id>"}` on ext_key conflicts or a list of `{path, message}` problems' }
+    Timestamp: { type: string, format: date-time, example: '2026-11-01T10:00:00.000Z' }
+    Kind: { type: string, enum: [clothing, object, utility] }
+    Lifecycle: { type: string, enum: [owned, gone] }
+    GoneReason:
+      type: string
+      description: Free text; suggested values sold, donated, discarded, lost, other.
+      examples: [sold, donated, discarded, lost]
+    ReviewState: { type: string, enum: [ok, needs_review] }
+    PlacementStatus: { type: string, enum: [gone, staged, unknown, approximate, placed] }
+    LocationKind: { type: string, enum: [site, room, unit, shelf, container] }
+    FactBasis:
+      type: string
+      enum: [user, observed, looked_up, inferred]
+      description: Projection precedence is user > observed > looked_up > inferred.
+    FactStatus: { type: string, enum: [active, superseded, rejected] }
+    SubjectType: { type: string, enum: [item, product] }
+    LinkSubjectType: { type: string, enum: [item, product, location] }
+    MediaRole:
+      type: string
+      description: Registry-suggested (see /api/schema media_roles); unknown values are accepted.
+      examples: [flat_lay, on_body, stock, label, care_label, hang_tag, detail, defect, box_exterior, box_contents, receipt, location, other]
+    ObservationSource:
+      type: string
+      description: Registry-suggested (see /api/schema observation_sources); unknown values are accepted.
+      examples: [garment_label, care_label, hang_tag, print, packaging, receipt, user_note, other]
+    RecordedBy: { type: string, description: '`user` or `agent:<model>`', examples: [user, 'agent:claude-opus-5-5'] }
+    LocationRefString:
+      type: string
+      description: A location id, or `code:<CODE>` (case-insensitive).
+      examples: ['01JC0000000000000000000020', 'code:B-014']
+    Region:
+      type: object
+      description: Bounding box on the source photo as 0..1 fractions of the (auto-rotated) image.
+      required: [x, y, w, h]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+        w: { type: number, minimum: 0, maximum: 1 }
+        h: { type: number, minimum: 0, maximum: 1 }
+    Attrs:
+      type: object
+      description: Projected best value per fact key (any JSON value).
+      additionalProperties: true
+      example: { brand: Uniqlo, color: navy, size: M, season: 2023 Spring/Summer }
+
+    # ---------------------------------------------------------------- system
+    Health:
+      type: object
+      required: [status, version, schema_version, vips, auth_required, time]
+      properties:
+        status: { type: string, enum: [ok] }
+        version: { type: string }
+        schema_version: { type: integer }
+        vips: { type: string, description: libvips version or "unavailable" }
+        auth_required: { type: boolean, description: True when writes need a bearer token }
+        time: { type: string, format: date-time }
+    RegistryEntry:
+      type: object
+      required: [value, label, sort]
+      properties:
+        value: { type: string }
+        label: { type: string }
+        sort: { type: integer }
+        description: { type: [string, 'null'] }
+    MediaRoleEntry:
+      allOf:
+        - $ref: '#/components/schemas/RegistryEntry'
+        - type: object
+          properties:
+            cover_rank: { type: [integer, 'null'], description: Lower wins when picking a cover; null = never a cover }
+    FactKeyInput:
+      type: object
+      required: [label]
+      additionalProperties: false
+      properties:
+        label: { type: string }
+        value_type: { type: string, enum: [string, number, boolean, date, money, composition, json], default: string }
+        kinds: { type: array, items: { $ref: '#/components/schemas/Kind' }, description: Empty = all kinds }
+        filterable: { type: boolean, default: false }
+        sort: { type: integer, default: 100 }
+        description: { type: [string, 'null'] }
+    FactKey:
+      allOf:
+        - type: object
+          required: [key]
+          properties:
+            key: { type: string }
+        - $ref: '#/components/schemas/FactKeyInput'
+        - type: object
+          required: [value_type, kinds, filterable, sort]
+    IdentifierSchemeInput:
+      type: object
+      required: [label]
+      additionalProperties: false
+      properties:
+        label: { type: string }
+        brand: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        pattern: { type: [string, 'null'], description: Regex hint (not enforced) }
+        example: { type: [string, 'null'] }
+        notes: { type: [string, 'null'], description: Accumulated knowledge about the scheme }
+    IdentifierScheme:
+      allOf:
+        - type: object
+          required: [scheme]
+          properties:
+            scheme: { type: string }
+        - $ref: '#/components/schemas/IdentifierSchemeInput'
+    SchemaInfo:
+      type: object
+      required: [kinds, media_roles, observation_sources, location_kinds, fact_bases, gone_reasons, fact_keys, identifier_schemes]
+      properties:
+        kinds: { type: array, items: { $ref: '#/components/schemas/RegistryEntry' } }
+        media_roles: { type: array, items: { $ref: '#/components/schemas/MediaRoleEntry' } }
+        observation_sources: { type: array, items: { $ref: '#/components/schemas/RegistryEntry' } }
+        location_kinds: { type: array, items: { $ref: '#/components/schemas/LocationKind' } }
+        fact_bases: { type: array, items: { $ref: '#/components/schemas/FactBasis' } }
+        gone_reasons: { type: array, items: { type: string } }
+        fact_keys: { type: array, items: { $ref: '#/components/schemas/FactKey' } }
+        identifier_schemes: { type: array, items: { $ref: '#/components/schemas/IdentifierScheme' } }
+
+    # ---------------------------------------------------------------- shared views
+    MediaRef:
+      type: object
+      required: [id, sha256, mime, width, height, variant_status, thumb_url, display_url, orig_url]
+      properties:
+        id: { type: string }
+        sha256: { type: string }
+        mime: { type: string, example: image/heic }
+        width: { type: [integer, 'null'] }
+        height: { type: [integer, 'null'] }
+        variant_status: { type: string, enum: [pending, ready, failed, none] }
+        thumb_url: { type: [string, 'null'], example: /media/9f2c…/thumb, description: "Null until variants are ready, and for documents" }
+        display_url: { type: [string, 'null'] }
+        orig_url: { type: string }
+    LocationCrumb:
+      type: object
+      required: [id, code, name, kind]
+      properties:
+        id: { type: string }
+        code: { type: [string, 'null'] }
+        name: { type: string }
+        kind: { $ref: '#/components/schemas/LocationKind' }
+    LocationRef:
+      allOf:
+        - $ref: '#/components/schemas/LocationCrumb'
+        - type: object
+          required: [path, label, archived]
+          properties:
+            path: { type: array, items: { $ref: '#/components/schemas/LocationCrumb' }, description: "Root → this location, inclusive" }
+            label: { type: string, example: Unit 2 › B-014, description: 'Display path; the site is omitted when something deeper follows; containers/shelves by code' }
+            archived: { type: boolean }
+    Placement:
+      type: object
+      description: |
+        Derived "where is it" (PLAN.md §4.3), evaluated in this order:
+        `gone` (lifecycle gone) → `staged` (target set) → `unknown` (no
+        location) → `approximate` (location is a site or unit) → `placed`
+        (room, shelf or container).
+      required: [status, label, location, target, gone_reason, gone_at]
+      properties:
+        status: { $ref: '#/components/schemas/PlacementStatus' }
+        label: { type: string, examples: ['Unit 2 › B-014', 'Bedroom → going to Unit 2', 'Somewhere in Unit 2 (box unknown)', 'Location unknown', 'Sold · 2026-03'] }
+        location: { oneOf: [{ $ref: '#/components/schemas/LocationRef' }, { type: 'null' }] }
+        target: { oneOf: [{ $ref: '#/components/schemas/LocationRef' }, { type: 'null' }] }
+        gone_reason: { type: [string, 'null'] }
+        gone_at: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+    ItemSummary:
+      type: object
+      description: The card shape used in grids, box contents, staging and the inbox.
+      required: [id, kind, title, category, quantity, lifecycle, review_state, cover, placement, attrs, tags, product_id, ext_key, created_at, updated_at]
+      properties:
+        id: { type: string }
+        kind: { $ref: '#/components/schemas/Kind' }
+        title: { type: string }
+        category: { type: [string, 'null'], example: outerwear/shell }
+        quantity: { type: integer, minimum: 1 }
+        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
+        review_state: { $ref: '#/components/schemas/ReviewState' }
+        cover:
+          description: Explicit cover, else the best linked photo (flat_lay > stock > on_body > …). Null = show a kind/category placeholder.
+          oneOf: [{ $ref: '#/components/schemas/MediaRef' }, { type: 'null' }]
+        placement: { $ref: '#/components/schemas/Placement' }
+        attrs: { $ref: '#/components/schemas/Attrs' }
+        tags: { type: array, items: { type: string } }
+        product_id: { type: [string, 'null'] }
+        ext_key: { type: [string, 'null'] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    ItemList:
+      type: object
+      required: [items, next_cursor, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ItemSummary' } }
+        next_cursor: { type: [string, 'null'] }
+        total: { type: integer, description: Total matches across all pages }
+
+    # ---------------------------------------------------------------- knowledge
+    ObservationInput:
+      type: object
+      properties:
+        source: { $ref: '#/components/schemas/ObservationSource' }
+        media_id: { type: [string, 'null'], description: Photo it was read from }
+        region: { oneOf: [{ $ref: '#/components/schemas/Region' }, { type: 'null' }] }
+        text: { type: [string, 'null'], description: 'Verbatim transcription, line breaks kept. Mark uncertain readings with [?].' }
+        data: { type: object, additionalProperties: true, description: "As-read structure, no inference" }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    Observation:
+      type: object
+      required: [id, item_id, source, media_id, region, text, data, recorded_by, recorded_at, ext_key]
+      properties:
+        id: { type: string }
+        item_id: { type: string }
+        source: { type: string }
+        media_id: { type: [string, 'null'] }
+        media: { oneOf: [{ $ref: '#/components/schemas/MediaRef' }, { type: 'null' }], description: Present in ItemDetail }
+        region: { oneOf: [{ $ref: '#/components/schemas/Region' }, { type: 'null' }] }
+        text: { type: [string, 'null'] }
+        data: { type: object, additionalProperties: true }
+        recorded_by: { type: string }
+        recorded_at: { $ref: '#/components/schemas/Timestamp' }
+        ext_key: { type: [string, 'null'] }
+    IdentifierInput:
+      type: object
+      required: [scheme, value]
+      properties:
+        scheme: { type: string, description: 'Freeform; check /api/schema identifier_schemes first', example: uniqlo.product_code }
+        value: { type: string, description: As printed, example: 341-456789 }
+        observation_id: { type: [string, 'null'], description: Observation it was read from }
+        note: { type: [string, 'null'] }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    Identifier:
+      type: object
+      required: [id, subject_type, subject_id, scheme, value, value_norm, observation_id, note, recorded_by, recorded_at, ext_key]
+      properties:
+        id: { type: string }
+        subject_type: { $ref: '#/components/schemas/SubjectType' }
+        subject_id: { type: string }
+        scheme: { type: string }
+        value: { type: string }
+        value_norm: { type: string, example: '341456789' }
+        observation_id: { type: [string, 'null'] }
+        note: { type: [string, 'null'] }
+        recorded_by: { type: string }
+        recorded_at: { $ref: '#/components/schemas/Timestamp' }
+        ext_key: { type: [string, 'null'] }
+    FactSource:
+      type: object
+      description: 'One provenance entry. Exactly one of the id/url/note keys is typical. In nested creates and bundles, `observation`/`reference` are 0-based indexes into the same request.'
+      additionalProperties: false
+      properties:
+        observation_id: { type: string }
+        reference_id: { type: string }
+        media_id: { type: string }
+        url: { type: string }
+        note: { type: string }
+        observation: { type: integer, minimum: 0, description: Request-local index (nested create / bundle only) }
+        reference: { type: integer, minimum: 0, description: Request-local index (nested create / bundle only) }
+    FactInput:
+      type: object
+      required: [key, value, basis]
+      properties:
+        key: { type: string, description: 'Dotted, freeform; check /api/schema fact_keys first', example: color }
+        value: { description: Any JSON value }
+        basis: { $ref: '#/components/schemas/FactBasis' }
+        confidence: { type: number, minimum: 0, maximum: 1, default: 1 }
+        sources: { type: array, items: { $ref: '#/components/schemas/FactSource' } }
+        note: { type: [string, 'null'] }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    FactSupersede:
+      type: object
+      required: [value, basis]
+      additionalProperties: false
+      properties:
+        key: { type: string, description: Defaults to the superseded fact's key }
+        value: {}
+        basis: { $ref: '#/components/schemas/FactBasis' }
+        confidence: { type: number, minimum: 0, maximum: 1, default: 1 }
+        sources: { type: array, items: { $ref: '#/components/schemas/FactSource' } }
+        note: { type: [string, 'null'], description: Why it changed }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    FactReject:
+      type: object
+      additionalProperties: false
+      properties:
+        note: { type: [string, 'null'] }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    Fact:
+      type: object
+      required: [id, subject_type, subject_id, key, value, basis, confidence, sources, status, supersedes_id, note, recorded_by, recorded_at, ext_key]
+      properties:
+        id: { type: string }
+        subject_type: { $ref: '#/components/schemas/SubjectType' }
+        subject_id: { type: string }
+        key: { type: string }
+        value: {}
+        basis: { $ref: '#/components/schemas/FactBasis' }
+        confidence: { type: number }
+        sources: { type: array, items: { $ref: '#/components/schemas/FactSource' } }
+        status: { $ref: '#/components/schemas/FactStatus' }
+        supersedes_id: { type: [string, 'null'] }
+        note: { type: [string, 'null'] }
+        recorded_by: { type: string }
+        recorded_at: { $ref: '#/components/schemas/Timestamp' }
+        ext_key: { type: [string, 'null'] }
+    FactWrite:
+      type: object
+      description: A fact write returns the fact and the subject's recomputed attrs.
+      required: [fact, attrs]
+      properties:
+        fact: { $ref: '#/components/schemas/Fact' }
+        attrs: { $ref: '#/components/schemas/Attrs' }
+    ReferenceInput:
+      type: object
+      properties:
+        url: { type: [string, 'null'] }
+        title: { type: [string, 'null'] }
+        kind: { type: string, examples: [product_page, listing, review, receipt, other], default: other }
+        archive_media_id: { type: [string, 'null'], description: Archived snapshot (HTML/PDF/text) uploaded via /api/media }
+        fetched_at: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        notes: { type: [string, 'null'] }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    Reference:
+      type: object
+      required: [id, subject_type, subject_id, url, title, kind, archive_media_id, fetched_at, notes, recorded_by, recorded_at, ext_key]
+      properties:
+        id: { type: string }
+        subject_type: { $ref: '#/components/schemas/SubjectType' }
+        subject_id: { type: string }
+        url: { type: [string, 'null'] }
+        title: { type: [string, 'null'] }
+        kind: { type: string }
+        archive_media_id: { type: [string, 'null'] }
+        archive: { oneOf: [{ $ref: '#/components/schemas/MediaRef' }, { type: 'null' }], description: Present in detail views }
+        fetched_at: { type: [string, 'null'] }
+        notes: { type: [string, 'null'] }
+        recorded_by: { type: string }
+        recorded_at: { $ref: '#/components/schemas/Timestamp' }
+        ext_key: { type: [string, 'null'] }
+    TagEdit:
+      type: object
+      additionalProperties: false
+      properties:
+        add: { type: array, items: { type: string } }
+        remove: { type: array, items: { type: string } }
+    TagSet:
+      type: object
+      required: [tags]
+      properties:
+        tags: { type: array, items: { type: string } }
+
+    # ---------------------------------------------------------------- items
+    MediaLinkCreate:
+      type: object
+      required: [media_id]
+      additionalProperties: false
+      properties:
+        media_id: { type: string }
+        role: { $ref: '#/components/schemas/MediaRole' }
+        sort: { type: integer }
+        caption: { type: [string, 'null'] }
+    NestedIdentifier:
+      allOf:
+        - $ref: '#/components/schemas/IdentifierInput'
+        - type: object
+          properties:
+            observation: { type: integer, minimum: 0, description: Index into this request's observations }
+    ItemCreate:
+      type: object
+      required: [kind, title]
+      additionalProperties: false
+      properties:
+        kind: { $ref: '#/components/schemas/Kind' }
+        title: { type: string, minLength: 1 }
+        category: { type: [string, 'null'] }
+        quantity: { type: integer, minimum: 1, default: 1 }
+        notes: { type: [string, 'null'] }
+        tags: { type: array, items: { type: string } }
+        location: { oneOf: [{ $ref: '#/components/schemas/LocationRefString' }, { type: 'null' }], description: Null/absent = unknown }
+        target_location: { oneOf: [{ $ref: '#/components/schemas/LocationRefString' }, { type: 'null' }], description: Stage it to go here }
+        review_state: { $ref: '#/components/schemas/ReviewState' }
+        product_id: { type: [string, 'null'] }
+        parent_item_id: { type: [string, 'null'] }
+        cover_media_id: { type: [string, 'null'] }
+        ext_key: { type: [string, 'null'] }
+        media: { type: array, items: { $ref: '#/components/schemas/MediaLinkCreate' } }
+        observations: { type: array, items: { $ref: '#/components/schemas/ObservationInput' } }
+        identifiers: { type: array, items: { $ref: '#/components/schemas/NestedIdentifier' } }
+        facts: { type: array, items: { $ref: '#/components/schemas/FactInput' } }
+        references: { type: array, items: { $ref: '#/components/schemas/ReferenceInput' } }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    ItemPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        kind: { $ref: '#/components/schemas/Kind' }
+        title: { type: string, minLength: 1 }
+        category: { type: [string, 'null'] }
+        quantity: { type: integer, minimum: 1 }
+        notes: { type: [string, 'null'] }
+        tags: { type: array, items: { type: string }, description: Replaces the tag set }
+        review_state: { $ref: '#/components/schemas/ReviewState' }
+        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
+        gone_reason: { type: [string, 'null'] }
+        gone_at: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        product_id: { type: [string, 'null'] }
+        parent_item_id: { type: [string, 'null'] }
+        cover_media_id: { type: [string, 'null'] }
+        ext_key: { type: [string, 'null'] }
+    MediaLinkView:
+      type: object
+      required: [media, role, sort, caption]
+      properties:
+        media: { $ref: '#/components/schemas/Media' }
+        role: { type: string }
+        sort: { type: integer }
+        caption: { type: [string, 'null'] }
+    Movement:
+      type: object
+      required: [id, item_id, location_moved_id, kind, from, to, at, note, actor]
+      properties:
+        id: { type: string }
+        item_id: { type: [string, 'null'] }
+        location_moved_id: { type: [string, 'null'], description: Set when a whole box/location was moved }
+        kind: { type: string, enum: [move, stage, unstage] }
+        from: { oneOf: [{ $ref: '#/components/schemas/LocationRef' }, { type: 'null' }] }
+        to: { oneOf: [{ $ref: '#/components/schemas/LocationRef' }, { type: 'null' }] }
+        at: { $ref: '#/components/schemas/Timestamp' }
+        note: { type: [string, 'null'] }
+        actor: { type: string }
+    ItemDetail:
+      allOf:
+        - $ref: '#/components/schemas/ItemSummary'
+        - type: object
+          required: [notes, parent_item_id, location_id, target_location_id, cover_media_id, gone_reason, gone_at, attr_sources, media, observations, identifiers, facts, references, movements, product, parent, children]
+          properties:
+            notes: { type: [string, 'null'] }
+            parent_item_id: { type: [string, 'null'] }
+            location_id: { type: [string, 'null'] }
+            target_location_id: { type: [string, 'null'] }
+            cover_media_id: { type: [string, 'null'], description: Explicit cover only (summary `cover` includes the automatic pick) }
+            gone_reason: { type: [string, 'null'] }
+            gone_at: { type: [string, 'null'] }
+            attr_sources:
+              type: object
+              description: 'For each attrs key, which fact won: `{"color": {"fact_id": "…", "subject_type": "item"}}`. subject_type is `product` when the value came from the product.'
+              additionalProperties:
+                type: object
+                required: [fact_id, subject_type]
+                properties:
+                  fact_id: { type: string }
+                  subject_type: { $ref: '#/components/schemas/SubjectType' }
+            media: { type: array, items: { $ref: '#/components/schemas/MediaLinkView' }, description: Ordered by role sort then link sort }
+            observations: { type: array, items: { $ref: '#/components/schemas/Observation' }, description: Oldest first }
+            identifiers: { type: array, items: { $ref: '#/components/schemas/Identifier' } }
+            facts: { type: array, items: { $ref: '#/components/schemas/Fact' }, description: "All statuses, newest first; the UI shows active ones and history on demand" }
+            references: { type: array, items: { $ref: '#/components/schemas/Reference' } }
+            movements: { type: array, items: { $ref: '#/components/schemas/Movement' }, description: "Newest first. Only the item's own movements; moves of a box it sits in appear on the box's page." }
+            product: { oneOf: [{ $ref: '#/components/schemas/ProductDetail' }, { type: 'null' }] }
+            parent: { oneOf: [{ $ref: '#/components/schemas/ItemSummary' }, { type: 'null' }] }
+            children: { type: array, items: { $ref: '#/components/schemas/ItemSummary' } }
+
+    # ---------------------------------------------------------------- products
+    ProductCreate:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        brand: { type: [string, 'null'] }
+        name: { type: string, minLength: 1 }
+        notes: { type: [string, 'null'] }
+        ext_key: { type: [string, 'null'] }
+    ProductPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        brand: { type: [string, 'null'] }
+        name: { type: string, minLength: 1 }
+        notes: { type: [string, 'null'] }
+        ext_key: { type: [string, 'null'] }
+    Product:
+      type: object
+      required: [id, brand, name, attrs, notes, ext_key, created_at, updated_at, cover, item_count]
+      properties:
+        id: { type: string }
+        brand: { type: [string, 'null'] }
+        name: { type: string }
+        attrs: { $ref: '#/components/schemas/Attrs' }
+        notes: { type: [string, 'null'] }
+        ext_key: { type: [string, 'null'] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+        cover: { oneOf: [{ $ref: '#/components/schemas/MediaRef' }, { type: 'null' }], description: Best stock photo }
+        item_count: { type: integer }
+    ProductDetail:
+      allOf:
+        - $ref: '#/components/schemas/Product'
+        - type: object
+          required: [media, identifiers, facts, references, items]
+          properties:
+            media: { type: array, items: { $ref: '#/components/schemas/MediaLinkView' } }
+            identifiers: { type: array, items: { $ref: '#/components/schemas/Identifier' } }
+            facts: { type: array, items: { $ref: '#/components/schemas/Fact' } }
+            references: { type: array, items: { $ref: '#/components/schemas/Reference' } }
+            items: { type: array, items: { $ref: '#/components/schemas/ItemSummary' }, description: 'My items of this product (omitted, i.e. [], when nested inside ItemDetail)' }
+    ProductList:
+      type: object
+      required: [products, next_cursor]
+      properties:
+        products: { type: array, items: { $ref: '#/components/schemas/Product' } }
+        next_cursor: { type: [string, 'null'] }
+
+    # ---------------------------------------------------------------- facets / lookup
+    FacetValue:
+      type: object
+      required: [value, label, count]
+      properties:
+        value: { type: string, description: 'The filter value to send back (location id for `location`)' }
+        label: { type: string }
+        count: { type: integer }
+    FacetGroup:
+      type: object
+      required: [field, label, values]
+      properties:
+        field: { type: string, description: 'Query parameter name: kind, category, status, location, tag, review, attr.<key>', examples: [kind, attr.color] }
+        label: { type: string }
+        values: { type: array, items: { $ref: '#/components/schemas/FacetValue' }, description: "Count descending, then label" }
+    Facets:
+      type: object
+      required: [total, groups]
+      properties:
+        total: { type: integer, description: Matches for the full filter set }
+        groups:
+          type: array
+          description: 'Order: kind, status, category (top-level segment), location (top two levels), filterable attrs by fact_key sort, tag, review'
+          items: { $ref: '#/components/schemas/FacetGroup' }
+    IdentifierMatch:
+      type: object
+      required: [identifier]
+      properties:
+        identifier: { $ref: '#/components/schemas/Identifier' }
+        item: { oneOf: [{ $ref: '#/components/schemas/ItemSummary' }, { type: 'null' }] }
+        product: { oneOf: [{ $ref: '#/components/schemas/Product' }, { type: 'null' }] }
+    IdentifierLookup:
+      type: object
+      required: [value_norm, matches]
+      properties:
+        value_norm: { type: string }
+        matches: { type: array, items: { $ref: '#/components/schemas/IdentifierMatch' } }
+
+    # ---------------------------------------------------------------- locations
+    Location:
+      type: object
+      required: [id, code, name, kind, parent_id, cover_media_id, notes, layout, archived_at, created_at, updated_at]
+      properties:
+        id: { type: string }
+        code: { type: [string, 'null'], example: B-014 }
+        name: { type: string, example: Winter coats }
+        kind: { $ref: '#/components/schemas/LocationKind' }
+        parent_id: { type: [string, 'null'] }
+        cover_media_id: { type: [string, 'null'] }
+        notes: { type: [string, 'null'] }
+        layout: { type: [object, 'null'], additionalProperties: true, description: 'Reserved for the future map (PLAN.md §4.4)' }
+        archived_at: { type: [string, 'null'] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    LocationNode:
+      allOf:
+        - $ref: '#/components/schemas/Location'
+        - type: object
+          required: [label, cover, item_count, total_count, staged_count, children]
+          properties:
+            label: { type: string, description: Same as LocationRef.label }
+            cover: { oneOf: [{ $ref: '#/components/schemas/MediaRef' }, { type: 'null' }] }
+            item_count: { type: integer, description: Owned items directly here }
+            total_count: { type: integer, description: Owned items here or in any descendant }
+            staged_count: { type: integer, description: Items whose target is this location }
+            children: { type: array, items: { $ref: '#/components/schemas/LocationNode' } }
+    LocationTree:
+      type: object
+      required: [roots, unknown_count]
+      properties:
+        roots: { type: array, items: { $ref: '#/components/schemas/LocationNode' }, description: Ordered by kind then code/name }
+        unknown_count: { type: integer, description: Owned items with no location }
+    LocationCreate:
+      type: object
+      required: [name, kind]
+      additionalProperties: false
+      properties:
+        code: { type: [string, 'null'], description: "Printed label; unique, case-insensitive" }
+        name: { type: string, minLength: 1 }
+        kind: { $ref: '#/components/schemas/LocationKind' }
+        parent: { oneOf: [{ $ref: '#/components/schemas/LocationRefString' }, { type: 'null' }] }
+        notes: { type: [string, 'null'] }
+        cover_media_id: { type: [string, 'null'] }
+        layout: { type: [object, 'null'], additionalProperties: true }
+    LocationPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        code: { type: [string, 'null'] }
+        name: { type: string, minLength: 1 }
+        kind: { $ref: '#/components/schemas/LocationKind' }
+        notes: { type: [string, 'null'] }
+        cover_media_id: { type: [string, 'null'] }
+        layout: { type: [object, 'null'], additionalProperties: true }
+        archived: { type: boolean, description: false un-archives }
+    LocationDetail:
+      allOf:
+        - $ref: '#/components/schemas/LocationNode'
+        - type: object
+          required: [path, items, staged_items, movements, media]
+          properties:
+            path: { type: array, items: { $ref: '#/components/schemas/LocationCrumb' } }
+            items: { type: array, items: { $ref: '#/components/schemas/ItemSummary' }, description: "Owned items here (and in descendants when deep=true), newest first" }
+            staged_items: { type: array, items: { $ref: '#/components/schemas/ItemSummary' }, description: Items staged to go here }
+            movements: { type: array, items: { $ref: '#/components/schemas/Movement' }, description: 'Last 50: this location being moved, and items moved in or out' }
+            media: { type: array, items: { $ref: '#/components/schemas/MediaLinkView' }, description: "Photos linked to this location (box_exterior, box_contents, location)" }
+    MoveRequest:
+      type: object
+      required: [action]
+      additionalProperties: false
+      properties:
+        action: { type: string, enum: [move, stage, unstage] }
+        item_ids: { type: array, items: { type: string }, minItems: 1, maxItems: 1000 }
+        location_id: { $ref: '#/components/schemas/LocationRefString', description: Move this whole location (a box) instead of items }
+        to: { oneOf: [{ $ref: '#/components/schemas/LocationRefString' }, { type: 'null' }], description: 'Destination. For move: null = unknown (items) or top level (location). Required for stage.' }
+        clear_target: { type: boolean, default: false, description: 'move only: also clear target_location_id even when the destination is not the target' }
+        note: { type: [string, 'null'] }
+        actor: { $ref: '#/components/schemas/RecordedBy' }
+    MoveResult:
+      type: object
+      required: [moved, movements, items, location]
+      properties:
+        moved: { type: integer, description: Things whose location/target actually changed (no-ops are skipped and get no movement row) }
+        movements: { type: array, items: { $ref: '#/components/schemas/Movement' } }
+        items: { type: array, items: { $ref: '#/components/schemas/ItemSummary' }, description: Updated cards for item moves }
+        location: { oneOf: [{ $ref: '#/components/schemas/LocationNode' }, { type: 'null' }], description: The moved location for box moves }
+    StagingGroup:
+      type: object
+      required: [target, items]
+      properties:
+        target: { $ref: '#/components/schemas/LocationRef' }
+        items: { type: array, items: { $ref: '#/components/schemas/ItemSummary' } }
+    Staging:
+      type: object
+      required: [groups, unknown_count]
+      properties:
+        groups: { type: array, items: { $ref: '#/components/schemas/StagingGroup' }, description: Ordered by target label }
+        unknown_count: { type: integer, description: Owned items with no location (list them with GET /api/items?status=unknown) }
+
+    # ---------------------------------------------------------------- media
+    MediaUpload:
+      type: object
+      required: [file]
+      properties:
+        file: { type: string, format: binary, description: The file. Its filename becomes original_name. }
+        context: { type: string, description: 'Owner note about the photo ("bought in Tokyo 2019, the grey one not the navy"). Agents treat it as user-asserted.' }
+        link_subject_type: { $ref: '#/components/schemas/LinkSubjectType' }
+        link_subject_id: { type: string }
+        link_role: { $ref: '#/components/schemas/MediaRole' }
+    Media:
+      allOf:
+        - $ref: '#/components/schemas/MediaRef'
+        - type: object
+          required: [ext, bytes, taken_at, original_name, exif, context, variant_error, created_at, links]
+          properties:
+            ext: { type: string, example: heic }
+            bytes: { type: integer }
+            taken_at: { type: [string, 'null'], description: "EXIF DateTimeOriginal (UTC when the offset is known, else local time without Z)" }
+            original_name: { type: [string, 'null'], example: IMG_4101.HEIC }
+            exif: { type: [object, 'null'], additionalProperties: true, description: 'Subset: Make, Model, LensModel, Orientation, OffsetTime… Never GPS.' }
+            context: { type: [string, 'null'] }
+            variant_error: { type: [string, 'null'] }
+            created_at: { $ref: '#/components/schemas/Timestamp' }
+            links:
+              type: array
+              items: { $ref: '#/components/schemas/MediaLink' }
+    MediaUploadResult:
+      allOf:
+        - $ref: '#/components/schemas/Media'
+        - type: object
+          required: [deduplicated]
+          properties:
+            deduplicated: { type: boolean, description: True when the bytes were already stored and nothing was written }
+    MediaPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        context: { type: [string, 'null'] }
+    MediaLinkInput:
+      type: object
+      required: [subject_type, subject_id]
+      additionalProperties: false
+      properties:
+        subject_type: { $ref: '#/components/schemas/LinkSubjectType' }
+        subject_id: { type: string, description: 'Item/product id, or for locations a LocationRefString' }
+        role: { $ref: '#/components/schemas/MediaRole' }
+        sort: { type: integer }
+        caption: { type: [string, 'null'] }
+    MediaLink:
+      type: object
+      required: [media_id, subject_type, subject_id, role, sort, caption, created_at]
+      properties:
+        media_id: { type: string }
+        subject_type: { $ref: '#/components/schemas/LinkSubjectType' }
+        subject_id: { type: string }
+        role: { type: string }
+        sort: { type: integer }
+        caption: { type: [string, 'null'] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+    Inbox:
+      type: object
+      required: [media, next_cursor, media_count, review_items, review_count]
+      properties:
+        media: { type: array, items: { $ref: '#/components/schemas/Media' } }
+        next_cursor: { type: [string, 'null'] }
+        media_count: { type: integer }
+        review_items: { type: array, items: { $ref: '#/components/schemas/ItemSummary' }, description: 'needs_review items, newest first (up to 200)' }
+        review_count: { type: integer }
+
+    # ---------------------------------------------------------------- ingest
+    BundleMediaRef:
+      type: object
+      additionalProperties: false
+      description: 'Exactly one of media_id / sha256 / path. `path` is only understood by `inv ingest`, which uploads the file and replaces it with sha256.'
+      properties:
+        media_id: { type: string }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        path: { type: string, description: CLI only }
+        role: { $ref: '#/components/schemas/MediaRole' }
+        sort: { type: integer }
+        caption: { type: [string, 'null'] }
+        context: { type: [string, 'null'], description: Sets media.context if it is empty }
+    BundleObservation:
+      allOf:
+        - $ref: '#/components/schemas/ObservationInput'
+        - type: object
+          properties:
+            ext_key: { type: string }
+            media: { type: string, description: 'Media id, `sha256:<hex>`, or (CLI only) a local path' }
+    BundleIdentifier:
+      allOf:
+        - $ref: '#/components/schemas/IdentifierInput'
+        - type: object
+          properties:
+            ext_key: { type: string }
+            observation: { type: integer, minimum: 0, description: Index into this item's (or product's) observations }
+    BundleFact:
+      allOf:
+        - $ref: '#/components/schemas/FactInput'
+        - type: object
+          properties:
+            ext_key: { type: string }
+    BundleReference:
+      allOf:
+        - $ref: '#/components/schemas/ReferenceInput'
+        - type: object
+          properties:
+            ext_key: { type: string }
+            archive: { $ref: '#/components/schemas/BundleMediaRef', description: Alternative to archive_media_id }
+    BundleProduct:
+      type: object
+      required: [ext_key]
+      additionalProperties: false
+      description: 'Upserted by ext_key. Inside an item, `{ext_key}` alone links an existing/bundle product.'
+      properties:
+        ext_key: { type: string }
+        brand: { type: [string, 'null'] }
+        name: { type: string }
+        notes: { type: [string, 'null'] }
+        media: { type: array, items: { $ref: '#/components/schemas/BundleMediaRef' }, description: Usually role=stock }
+        identifiers: { type: array, items: { $ref: '#/components/schemas/BundleIdentifier' } }
+        facts: { type: array, items: { $ref: '#/components/schemas/BundleFact' } }
+        references: { type: array, items: { $ref: '#/components/schemas/BundleReference' } }
+    BundleItem:
+      type: object
+      required: [ext_key, kind, title]
+      additionalProperties: false
+      properties:
+        ext_key: { type: string, description: 'Stable idempotency key, e.g. batch-2026-11-01/jacket-01' }
+        kind: { $ref: '#/components/schemas/Kind' }
+        title: { type: string }
+        category: { type: [string, 'null'] }
+        quantity: { type: integer, minimum: 1 }
+        notes: { type: [string, 'null'] }
+        tags: { type: array, items: { type: string }, description: Added (never removed) on re-apply }
+        location: { $ref: '#/components/schemas/LocationRefString', description: Applied on create only }
+        target_location: { $ref: '#/components/schemas/LocationRefString', description: Applied on create only }
+        review_state: { $ref: '#/components/schemas/ReviewState' }
+        parent: { type: string, description: ext_key of another item (in this bundle or existing) }
+        cover: { type: integer, minimum: 0, description: Index into media to use as explicit cover }
+        product: { $ref: '#/components/schemas/BundleProduct' }
+        media: { type: array, items: { $ref: '#/components/schemas/BundleMediaRef' } }
+        observations: { type: array, items: { $ref: '#/components/schemas/BundleObservation' } }
+        identifiers: { type: array, items: { $ref: '#/components/schemas/BundleIdentifier' } }
+        facts: { type: array, items: { $ref: '#/components/schemas/BundleFact' } }
+        references: { type: array, items: { $ref: '#/components/schemas/BundleReference' } }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    BundleDefaults:
+      type: object
+      additionalProperties: false
+      properties:
+        kind: { $ref: '#/components/schemas/Kind' }
+        location: { $ref: '#/components/schemas/LocationRefString' }
+        target_location: { $ref: '#/components/schemas/LocationRefString' }
+        review_state: { $ref: '#/components/schemas/ReviewState', default: needs_review }
+        recorded_by: { $ref: '#/components/schemas/RecordedBy' }
+    Bundle:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        defaults: { $ref: '#/components/schemas/BundleDefaults' }
+        products: { type: array, items: { $ref: '#/components/schemas/BundleProduct' }, description: Products referenced by several items can be declared once here }
+        items: { type: array, items: { $ref: '#/components/schemas/BundleItem' } }
+    BundleOutcome:
+      type: object
+      required: [ext_key, id, action, changes, warnings]
+      properties:
+        ext_key: { type: string }
+        id: { type: [string, 'null'], description: Null in dry-run for items that would be created }
+        action: { type: string, enum: [created, updated, unchanged] }
+        changes: { type: array, items: { type: string }, description: 'Human-readable, e.g. "title", "+2 observations", "fact color superseded"' }
+        warnings: { type: array, items: { type: string }, description: 'e.g. "identifier rn 12345 also on item 01J… (possible duplicate)"' }
+    BundleResult:
+      type: object
+      required: [dry_run, items, products]
+      properties:
+        dry_run: { type: boolean }
+        items: { type: array, items: { $ref: '#/components/schemas/BundleOutcome' } }
+        products: { type: array, items: { $ref: '#/components/schemas/BundleOutcome' } }
