@@ -72,8 +72,9 @@ Notes:
   for every request, which breaks the write budget below. Turn it on only
   while debugging.
 - To pin a version, replace `:latest` with a commit tag such as
-  `:sha-1a2b3c4` (CI publishes one for every push to `main`) or a release
-  tag such as `:1.0.0`.
+  `:sha-1a2b3c4` (CI publishes one each time it is run on `main`) or a
+  release tag such as `:1.0.0`. CI runs only when triggered by hand:
+  Actions → ci → Run workflow, or `gh workflow run ci.yml --ref main`.
 
 **The image is public:** the NAS pulls it without logging in. After CI's
 first push to GHCR, the owner may need to make the package public once:
