@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -70,6 +72,21 @@ func TestZeroWriteSoak(t *testing.T) {
 	if testing.Short() {
 		t.Skip("seeds ~100 images through vips")
 	}
+	// With test caching on, `go test` passes -test.testlogfile and this
+	// process logs every file it opens (each media file served) to that
+	// log in 4 KiB buffered writes, which shows up in write_bytes. Measure
+	// in a child test process that has no test log.
+	if f := flag.Lookup("test.testlogfile"); f != nil && f.Value.String() != "" && os.Getenv("INV_SOAK_CHILD") == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestZeroWriteSoak$", "-test.v", "-test.count=1")
+		cmd.Env = append(os.Environ(), "INV_SOAK_CHILD=1")
+		out, err := cmd.CombinedOutput()
+		t.Logf("child test process:\n%s", out)
+		if err != nil {
+			t.Fatalf("soak in child process failed: %v", err)
+		}
+		return
+	}
+
 	idle := envDuration(t, "INV_SOAK_IDLE", 4*time.Second)
 	rounds := envInt(t, "INV_SOAK_ROUNDS", 2)
 
