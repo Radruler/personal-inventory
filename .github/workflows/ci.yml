@@ -32,17 +32,31 @@ jobs:
           cache-from: type=gha,scope=devcontainer
           cache-to: type=gha,mode=max,scope=devcontainer
 
+      # Real vips/libheif come from the dev container. `go test ./...` includes
+      # the zero-write soak (internal/ops), the 48 MP HEIC memory test
+      # (internal/media) and the backup tests; none run with -short.
       - name: Test in dev container
         run: |
           docker run --rm -v "$PWD:/workspaces/personal-inventory" \
             -w /workspaces/personal-inventory inv-dev:ci \
-            sh -c 'cd web && npm ci && cd .. && make web && make test'
+            sh -c 'test -z "$(gofmt -l cmd internal migrations | tee /dev/stderr)" && cd web && npm ci && cd .. && make web && make test'
 
       - name: Lint OpenAPI contract
         run: docker run --rm -v "$PWD/api:/spec" -w /spec redocly/cli:1.25.11 lint openapi.yaml
 
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: actionlint (this workflow)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+
+      - name: shellcheck (scripts/)
+        run: docker run --rm --entrypoint shellcheck -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 scripts/*.sh
+
   image:
-    needs: test
+    needs: [test, lint]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -53,6 +67,28 @@ jobs:
       - uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
+
+      # Native amd64 (the NAS's architecture): the runtime image starts,
+      # finds vips and serves /api/health. Shares the build cache below.
+      - name: Smoke test the amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: inv:smoke
+          build-args: VERSION=smoke
+          cache-from: type=gha,scope=image
+
+      - name: Run the smoke image
+        run: |
+          docker run -d --name inv-smoke -p 127.0.0.1:8480:8480 inv:smoke
+          for _ in $(seq 1 50); do curl -fsS http://127.0.0.1:8480/api/health && break; sleep 0.2; done
+          echo
+          curl -fsS http://127.0.0.1:8480/api/health | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:8480/api/health | grep -vq '"vips":"unavailable"'
+          docker exec inv-smoke inv backup
+          docker rm -f inv-smoke
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'

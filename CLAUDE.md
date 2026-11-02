@@ -42,11 +42,13 @@ internal/testutil   NewDeps (temp DB), Do (httptest JSON), Mtimes (zero-write ch
 internal/items      thread A      internal/media      thread B
 internal/locations  thread C      internal/ingest     thread G
 internal/seed       demo data     internal/webui      embedded SPA handler
+internal/ops        thread H (backup, soak/memory checks)
 migrations/         001_init.sql (schema + seeded registries)
 web/src/styles      tokens.css (all visual values), base.css
 web/src/lib/api     generated schema.d.ts + client.ts (typed openapi-fetch client)
 web/src/lib/components  thread D (UI kit; shown on /dev/kit)
 web/src/routes/(items)  thread E; (locations) (staging) (inbox) (add)  thread F
+docs/agents/        thread G (ingest/enrich playbooks); docs/DEPLOY.md thread H
 ```
 
 Rules for every thread:

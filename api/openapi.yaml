@@ -778,7 +778,8 @@ paths:
         Media must already be uploaded and is referenced by `media_id` or
         `sha256` (`inv ingest` uploads local `path`s first and rewrites
         them). With `?dry_run=true` nothing is written and the result says
-        what would change. `location`/`target_location` apply only when an
+        what would change; in a dry run an unknown `sha256` is a warning
+        rather than a 422, so `inv ingest --dry-run` works before uploading. `location`/`target_location` apply only when an
         item is created, so re-running never undoes a move made since.
       parameters:
         - { name: dry_run, in: query, schema: { type: boolean, default: false } }

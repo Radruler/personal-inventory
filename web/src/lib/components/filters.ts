@@ -1,7 +1,8 @@
 // Filter-sheet selection state (pure; unit-tested).
 //
 // A FilterState maps a facet `field` (the query parameter name: kind,
-// category, status, location, tag, review, attr.<key>) to the selected
+// category, status, location, tag, review, lifecycle, product,
+// attr.<key>) to the selected
 // values. It converts to and from URL query strings with the same encoding
 // as `itemQuery` in $lib/api/client, so views can keep filters in the URL.
 import { itemQuery, type Facets, type Schemas } from '$lib/api/client';
@@ -11,7 +12,7 @@ export type FacetGroup = Schemas['FacetGroup'];
 export type FacetValue = Schemas['FacetValue'];
 
 /** Fields the API accepts once (a plain string, not an array). */
-export const SINGLE_VALUE_FIELDS: ReadonlySet<string> = new Set(['location', 'review']);
+export const SINGLE_VALUE_FIELDS: ReadonlySet<string> = new Set(['location', 'review', 'lifecycle', 'product']);
 
 /** Fields filterState understands besides attr.<key>. */
 export const LIST_FIELDS: ReadonlySet<string> = new Set(['kind', 'category', 'status', 'tag']);
@@ -62,6 +63,8 @@ export function toItemQuery(state: FilterState, extra: Omit<ItemQueryInput, 'att
     else if (field === 'tag') q.tag = [...values];
     else if (field === 'location') q.location = values[0];
     else if (field === 'review') q.review = values[0];
+    else if (field === 'lifecycle') q.lifecycle = values[0];
+    else if (field === 'product') q.product = values[0];
   }
   if (Object.keys(attrs).length) q.attrs = attrs;
   return q;

@@ -3,6 +3,7 @@
   // Detail · Other; only tabs with photos). The active tab shows a large
   // display-size photo and a thumbnail strip; tapping the photo opens the
   // full-screen MediaViewer (swipe/arrows, link to the original).
+  import type { Snippet } from 'svelte';
   import type { Schemas } from '$lib/api/client';
   import EmptyState from './EmptyState.svelte';
   import Icon from './Icon.svelte';
@@ -15,7 +16,9 @@
     media,
     title = 'Item',
     tab = $bindable(),
-    emptyMessage = 'No photos yet.'
+    emptyMessage = 'No photos yet.',
+    coverId = null,
+    actions
   }: {
     /** ItemDetail.media / ProductDetail.media (ordered by the server). */
     media: Schemas['MediaLinkView'][];
@@ -24,6 +27,10 @@
     /** Active tab (bindable). */
     tab?: GalleryTabId;
     emptyMessage?: string;
+    /** Media id of the cover photo; the hero shows a "Cover" marker on it. */
+    coverId?: string | null;
+    /** Extra controls under the photo, for the photo being shown (e.g. "Set as cover"). */
+    actions?: Snippet<[GalleryPhoto]>;
   } = $props();
 
   const groups = $derived(groupByTab(media));
@@ -79,7 +86,13 @@
             {#if shown.caption || active.id === 'labels' || active.id === 'detail'}
               <span class="cap">{shown.caption || roleLabel(shown.role)}</span>
             {/if}
+            {#if coverId && shown.media.id === coverId}
+              <span class="cover-mark">Cover</span>
+            {/if}
           </button>
+          {#if actions}
+            <div class="actions">{@render actions(shown)}</div>
+          {/if}
         {/if}
         {#if photos.length > 1}
           <ul class="strip" aria-label="{active.label} photos">
@@ -154,6 +167,24 @@
     color: var(--color-text);
     font-size: var(--text-xs);
     text-align: left;
+  }
+  .cover-mark {
+    position: absolute;
+    top: var(--space-2);
+    left: var(--space-2);
+    padding: var(--space-0) var(--space-2);
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--color-surface) 90%, transparent);
+    color: var(--color-text);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
   .strip {
     display: flex;

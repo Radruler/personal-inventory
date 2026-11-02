@@ -24,7 +24,9 @@ import (
 	"github.com/radruler/personal-inventory/internal/config"
 	"github.com/radruler/personal-inventory/internal/db"
 	"github.com/radruler/personal-inventory/internal/httpapi"
+	"github.com/radruler/personal-inventory/internal/ingest"
 	"github.com/radruler/personal-inventory/internal/media"
+	"github.com/radruler/personal-inventory/internal/ops"
 	"github.com/radruler/personal-inventory/internal/seed"
 	"github.com/radruler/personal-inventory/internal/server"
 )
@@ -52,8 +54,16 @@ func run(args []string) error {
 	case "version", "--version", "-v":
 		fmt.Println(version)
 		return nil
-	case "ingest", "export", "import", "backup":
-		return fmt.Errorf("%s: not implemented yet", cmd)
+	case "ingest":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return ingest.RunCLI(ctx, args, os.Stdout)
+	case "export":
+		return withDeps(func(ctx context.Context, d *httpapi.Deps) error { return ingest.ExportCLI(ctx, d, args, os.Stdout) })
+	case "import":
+		return withDeps(func(ctx context.Context, d *httpapi.Deps) error { return ingest.ImportCLI(ctx, d, args, os.Stdout) })
+	case "backup":
+		return withDeps(func(ctx context.Context, d *httpapi.Deps) error { return ops.BackupCLI(ctx, d, args, os.Stdout) })
 	case "media":
 		if len(args) != 1 || args[0] != "rebuild" {
 			return fmt.Errorf("usage: inv media rebuild")

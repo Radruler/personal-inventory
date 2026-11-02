@@ -703,7 +703,8 @@ export interface paths {
          *     Media must already be uploaded and is referenced by `media_id` or
          *     `sha256` (`inv ingest` uploads local `path`s first and rewrites
          *     them). With `?dry_run=true` nothing is written and the result says
-         *     what would change. `location`/`target_location` apply only when an
+         *     what would change; in a dry run an unknown `sha256` is a warning
+         *     rather than a 422, so `inv ingest --dry-run` works before uploading. `location`/`target_location` apply only when an
          *     item is created, so re-running never undoes a move made since.
          */
         post: operations["applyBundle"];
@@ -875,13 +876,13 @@ export interface components {
              * @default string
              * @enum {string}
              */
-            value_type: "string" | "number" | "boolean" | "date" | "money" | "composition" | "json";
+            value_type?: "string" | "number" | "boolean" | "date" | "money" | "composition" | "json";
             /** @description Empty = all kinds */
             kinds?: components["schemas"]["Kind"][];
             /** @default false */
-            filterable: boolean;
+            filterable?: boolean;
             /** @default 100 */
-            sort: number;
+            sort?: number;
             description?: string | null;
         };
         FactKey: {
@@ -1071,7 +1072,7 @@ export interface components {
             value: unknown;
             basis: components["schemas"]["FactBasis"];
             /** @default 1 */
-            confidence: number;
+            confidence?: number;
             sources?: components["schemas"]["FactSource"][];
             note?: string | null;
             recorded_by?: components["schemas"]["RecordedBy"];
@@ -1082,7 +1083,7 @@ export interface components {
             value: unknown;
             basis: components["schemas"]["FactBasis"];
             /** @default 1 */
-            confidence: number;
+            confidence?: number;
             sources?: components["schemas"]["FactSource"][];
             /** @description Why it changed */
             note?: string | null;
@@ -1124,7 +1125,7 @@ export interface components {
              * @example receipt
              * @example other
              */
-            kind: string;
+            kind?: string;
             /** @description Archived snapshot (HTML/PDF/text) uploaded via /api/media */
             archive_media_id?: string | null;
             fetched_at?: components["schemas"]["Timestamp"] | null;
@@ -1169,7 +1170,7 @@ export interface components {
             title: string;
             category?: string | null;
             /** @default 1 */
-            quantity: number;
+            quantity?: number;
             notes?: string | null;
             tags?: string[];
             /** @description Null/absent = unknown */
@@ -1406,7 +1407,7 @@ export interface components {
              * @description move only: also clear target_location_id even when the destination is not the target
              * @default false
              */
-            clear_target: boolean;
+            clear_target?: boolean;
             note?: string | null;
             actor?: components["schemas"]["RecordedBy"];
         };
@@ -1564,7 +1565,7 @@ export interface components {
             location?: components["schemas"]["LocationRefString"];
             target_location?: components["schemas"]["LocationRefString"];
             /** @default needs_review */
-            review_state: components["schemas"]["ReviewState"];
+            review_state?: components["schemas"]["ReviewState"];
             recorded_by?: components["schemas"]["RecordedBy"];
         };
         Bundle: {

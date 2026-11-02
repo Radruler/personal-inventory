@@ -2,6 +2,74 @@
 
 Newest first. Coordinator updates this at each gate.
 
+## 2026-11-01 — Phase 2 (views, agent path, ops): gate passed
+
+- **E, browse & detail**: All items (search first, URL-synced filters/sort,
+  facets sheet, infinite scroll + Load more, scroll restore) and Item detail
+  (Where-it-is panel with Move/Stage/Unstage + undo, role-tabbed gallery with
+  uploads and cover, verbatim observations with `[?]` highlighting,
+  identifiers, What-we-know with provenance sheet, correct/reject/add fact,
+  product, references, sets, history).
+- **F, places, packing, inbox, quick add**: location tree, box pages (photos,
+  contents, staged, history, edit/archive, Move box, multi-select), printable
+  labels with a self-contained QR encoder (4×6, A6, sheets of six), packing
+  (pack into existing or new box in one move, undo), inbox (bulk upload with
+  per-photo notes, assign / create item / delete, review accept), quick add.
+- **G, agent ingest**: `POST /api/ingest/bundle` (validate-all 422, one
+  transaction, idempotent via derived ext_keys, dry run), `inv ingest`
+  (sha256 + HEAD, uploads only missing files, sidecar context), export
+  (tar and `inv export`) / `inv import` with a byte-identical round trip,
+  `docs/agents/INGEST_PLAYBOOK.md` and `ENRICH_PLAYBOOK.md` (examples are
+  tested).
+- **H, ops & budgets**: `inv backup` (VACUUM INTO, `--keep`), zero-write
+  soak test (Go, in `make test`) and `scripts/soak.sh`,
+  `scripts/measure-memory.sh`, CI lint job (actionlint + shellcheck) and an
+  amd64 smoke test before push, `docs/DEPLOY.md` (TrueNAS custom app).
+
+Measured (production image, arm64 Docker Desktop):
+
+| | Measured | Budget |
+|---|---|---|
+| Idle RSS after restart | 14.8 MB | < 40 MB |
+| RSS after 15.7k browse requests | 25.6 MB | < 40 MB |
+| 48 MP HEIC peak, app + vips | 90.4 MB | < 150 MB |
+| 48 MP JPEG peak, app + vips | 70.5 MB | < 150 MB |
+| Writes while idle 45 s / browsing 1 min (15,708 requests) | 0 B, no file changed | 0 |
+
+Gate checks by the coordinator:
+
+- `make test`: every Go package (incl. ingest round trip, backup, soak),
+  svelte-check 0/0, vitest 81 tests. actionlint and shellcheck clean.
+- `scripts/soak.sh` against the rebuilt production container: PASS.
+- `inv ingest` of the fixture folder against the container: first run
+  uploads 4 photos and creates 3 items; second run uploads nothing and
+  reports everything unchanged. `GET /api/export` streams all tables + originals.
+- Multi-arch: thread H built linux/arm64 (89 MB) and linux/amd64 (102 MB)
+  separately and ran the amd64 image under emulation (health, seed, backup).
+  The combined buildx push runs in CI only (not run yet: nothing pushed).
+
+Coordinator decisions in Phase 2:
+
+- Generated TS types no longer treat request fields with defaults as
+  required (`--default-non-nullable false`).
+- Contract: dry-run bundles treat unknown sha256 as a warning.
+- Accepted: G's re-apply rules (bundle `review_state` only when the item sets
+  it; observations append-only; facts superseded on change; rejected facts
+  never revived), F's QR-by-id labels and literal black-on-white print.
+
+Known gaps / follow-ups:
+
+- `TestZeroWriteSoak` failed twice inside a parallel `go test ./...` early
+  on and then passed 9 runs in a row (alone and in parallel); not reproduced,
+  cause unknown. The container soak passes.
+- Refactors proposed by G: export shared helpers from items/media instead of
+  local copies in ingest; an identifier_scheme "unique" flag instead of a
+  hardcoded company-scheme list.
+- Icons `print`, `camera`, `trash` for the kit.
+- Re-applying an old bundle overwrites a title the owner has since edited
+  (title is required in BundleItem).
+- iOS Safari HEIC upload still unverified on a real phone.
+
 ## 2026-11-01 — Phase 1 (backend domains + UI kit): gate passed
 
 Threads ran as parallel subagents, each in its own directory. The

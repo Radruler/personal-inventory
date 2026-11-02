@@ -1,0 +1,106 @@
+{
+  "defaults": {
+    "location": "code:BEDROOM",
+    "target_location": "code:U2",
+    "review_state": "needs_review",
+    "recorded_by": "agent:claude-opus-5-5"
+  },
+  "products": [
+    {
+      "ext_key": "uniqlo/341-456789/23SS",
+      "brand": "Uniqlo",
+      "name": "Blocktech Parka (23SS)",
+      "identifiers": [
+        { "scheme": "uniqlo.product_code", "value": "341-456789" },
+        { "scheme": "uniqlo.season_code", "value": "23SS" }
+      ],
+      "facts": [
+        {
+          "key": "season", "value": "2023 Spring/Summer", "basis": "inferred", "confidence": 0.8,
+          "sources": [{ "note": "Uniqlo season suffix: 23SS = 2023 Spring/Summer (identifier scheme uniqlo.season_code)" }]
+        }
+      ]
+    }
+  ],
+  "items": [
+    {
+      "ext_key": "batch-2026-11-01/navy-shell-jacket",
+      "kind": "clothing",
+      "title": "Navy shell jacket",
+      "category": "outerwear/shell",
+      "notes": "Grouped from IMG_4101 (flat lay) and IMG_4102 (care label), taken 40 s apart. Product name not confirmed; see the enrich pass.",
+      "tags": ["rain"],
+      "product": { "ext_key": "uniqlo/341-456789/23SS" },
+      "media": [
+        { "path": "IMG_4101.HEIC", "role": "flat_lay" },
+        { "path": "IMG_4102.JPG", "role": "care_label" }
+      ],
+      "cover": 0,
+      "observations": [
+        {
+          "source": "care_label",
+          "media": "IMG_4102.JPG",
+          "text": "SHELL: 100% NYLON\nLINING: 100% POLYESTER\nRN 12345\nMADE IN VIETNAM\n341-456789(23SS)\nMACHINE WASH C[?]LD",
+          "data": {
+            "composition": [
+              { "part": "shell", "materials": [{ "name": "nylon", "pct": 100 }] },
+              { "part": "lining", "materials": [{ "name": "polyester", "pct": 100 }] }
+            ],
+            "country_of_origin": "VIETNAM",
+            "codes": ["RN 12345", "341-456789(23SS)"],
+            "care": ["MACHINE WASH C[?]LD"]
+          }
+        }
+      ],
+      "identifiers": [
+        { "scheme": "rn", "value": "12345", "observation": 0 },
+        { "scheme": "uniqlo.product_code", "value": "341-456789", "observation": 0 },
+        { "scheme": "uniqlo.season_code", "value": "23SS", "observation": 0 }
+      ],
+      "facts": [
+        {
+          "key": "composition", "basis": "observed", "confidence": 1,
+          "value": [
+            { "part": "shell", "materials": [{ "name": "nylon", "pct": 100 }] },
+            { "part": "lining", "materials": [{ "name": "polyester", "pct": 100 }] }
+          ],
+          "sources": [{ "observation": 0 }]
+        },
+        { "key": "country_of_origin", "value": "Vietnam", "basis": "observed", "confidence": 1, "sources": [{ "observation": 0 }] },
+        {
+          "key": "brand", "value": "Uniqlo", "basis": "inferred", "confidence": 0.9,
+          "sources": [{ "observation": 0 }, { "note": "341-xxxxxx(23SS) is the Uniqlo product code format; no brand name is printed on this label" }]
+        },
+        { "key": "color", "value": "navy", "basis": "inferred", "confidence": 0.7, "sources": [{ "note": "judged from the flat-lay photo IMG_4101" }] },
+        { "key": "purchase_place", "value": "Tokyo", "basis": "user", "confidence": 1, "sources": [{ "note": "owner's context note on IMG_4101" }] },
+        { "key": "purchase_date", "value": "2019", "basis": "user", "confidence": 1, "sources": [{ "note": "owner's context note on IMG_4101" }] }
+      ]
+    },
+    {
+      "ext_key": "batch-2026-11-01/grey-crew-tee",
+      "kind": "clothing",
+      "title": "Grey crew-neck T-shirt",
+      "category": "tops/t-shirt",
+      "notes": "Only a flat lay; no label photographed, so nothing observed.",
+      "media": [{ "path": "IMG_4103.HEIC", "role": "flat_lay" }],
+      "facts": [
+        { "key": "color", "value": "grey", "basis": "inferred", "confidence": 0.6, "sources": [{ "note": "judged from the flat-lay photo IMG_4103" }] }
+      ]
+    },
+    {
+      "ext_key": "batch-2026-11-01/usb-c-cables",
+      "kind": "utility",
+      "title": "USB-C to USB-C cable, black",
+      "category": "cable/usb-c",
+      "quantity": 2,
+      "media": [{ "path": "IMG_4104.JPG", "role": "detail" }],
+      "observations": [
+        { "source": "print", "media": "IMG_4104.JPG", "text": "1M 60W", "data": { "codes": ["1M 60W"] } }
+      ],
+      "facts": [
+        { "key": "length", "value": "1 m", "basis": "observed", "confidence": 1, "sources": [{ "observation": 0 }] },
+        { "key": "connector", "value": "USB-C to USB-C", "basis": "inferred", "confidence": 0.8, "sources": [{ "note": "both plug ends visible in IMG_4104" }] }
+      ]
+    }
+  ]
+}
