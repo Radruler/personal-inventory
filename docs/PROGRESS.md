@@ -2,6 +2,40 @@
 
 Newest first. Coordinator updates this at each gate.
 
+## 2026-11-01 — Phase 3: end-to-end walkthrough passed
+
+In the browser pane against the production container (demo seed + the
+ingest fixture):
+
+1. **Ingest:** `inv ingest internal/ingest/testdata/folder/bundle.json`
+   uploaded 4 photos and created 3 items (needs_review, staged Bedroom →
+   Unit 2); a second run changed nothing.
+2. **Review:** Inbox → To review listed them. The jacket's page showed the
+   care label verbatim (incl. `C[?]LD`), identifiers, derived facts with
+   provenance, owner context as "You", and the product. Marked reviewed;
+   accepted the other two from the inbox (7 → 4 to review).
+3. **Stage → pack:** Packing → Unit 2 group, selected the three, "Pack into
+   box…" → New box B-021 "Ingest batch 1" in Unit 2. All three became
+   placed at "Unit 2 › B-021".
+4. **Find:** searching "nylon shell" (care-label text + title) found the
+   jacket with its chip "Unit 2 › B-021".
+5. **Move box:** B-021 page → Move box → Unit 1. The jacket now reads
+   "Unit 1 › B-021"; its row was not written (updated_at unchanged); one
+   box movement recorded.
+
+RSS after the walkthrough: 28.9 MB.
+
+Polish noted during the walkthrough (not blocking):
+
+- History shows a past move's destination by its *current* path (the
+  pack shows "→ Unit 1 › B-021" after the box moved).
+- An item's first staging reads "Restaged from Bedroom to Unit 2";
+  "Staged for Unit 2" would read better.
+
+**Ready for the first real photo ingest with the owner** (Phase 3 step 2).
+Not done without the owner: creating the GitHub repo, pushing (which runs
+CI and publishes the GHCR image), and the NAS deploy.
+
 ## 2026-11-01 — Phase 2 (views, agent path, ops): gate passed
 
 - **E, browse & detail**: All items (search first, URL-synced filters/sort,

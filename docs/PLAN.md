@@ -1,6 +1,6 @@
 # Personal Inventory — MVP Plan
 
-Status: **v2, Phase 0 complete** (2026-11-01). Decisions are in
+Status: **v2, Phases 0–2 complete, Phase 3 walkthrough passed** (2026-11-01). Decisions are in
 §12. Items marked *(assumed)* are defaults I picked; they can change.
 
 ## 1. What this is
